@@ -1,0 +1,4 @@
+# Add to /etc/caddy/Caddyfile (replace the host with your subdomain), then: systemctl reload caddy
+atc.smspilot.app {
+	reverse_proxy 127.0.0.1:8090
+}
