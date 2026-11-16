@@ -10,7 +10,7 @@ apt-get install -y -qq python3-venv python3-dev rsync curl >/dev/null
 
 id aiatc >/dev/null 2>&1 || useradd --system --home "$DEST" --shell /usr/sbin/nologin aiatc
 mkdir -p "$DEST"
-rsync -a --delete --exclude .git --exclude .venv --exclude .env --exclude data --exclude voices --exclude logs \
+rsync -a --delete --exclude /.git --exclude /.venv --exclude /.env --exclude /data --exclude /voices --exclude /logs --exclude __pycache__ \
   "$SRC/" "$DEST/"
 mkdir -p "$DEST/data" "$DEST/voices" "$DEST/logs"
 
@@ -37,5 +37,5 @@ cp "$DEST/deploy/ai-atc.service" /etc/systemd/system/ai-atc.service
 systemctl daemon-reload
 systemctl enable ai-atc >/dev/null
 systemctl restart ai-atc
-sleep 8
+sleep 25
 curl -fsS http://127.0.0.1:8090/health && echo " <- ai-atc is up"
