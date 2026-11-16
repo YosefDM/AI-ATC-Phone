@@ -1,0 +1,61 @@
+import numpy as np
+
+from atc.audio.codec import ulaw_decode, ulaw_encode
+from atc.audio.detect import is_dtmf_frame
+from atc.controller import normalize_callsign
+from atc.flight import _legal, aircraft_class
+from atc.readback import check
+from atc.speech.spoken import callsign, speak
+
+
+def test_spoken_clearance():
+    s = speak("United 123, climb and maintain 2500, expect FL230 10 minutes after departure. "
+              "Departure frequency 119.2, squawk 4512.", "United 123")
+    assert "United one twenty three" in s
+    assert "two thousand five hundred" in s
+    assert "flight level two three zero" in s
+    assert "one one niner point two" in s
+    assert "squawk four five one two" in s
+
+
+def test_spoken_runway_heading_altimeter():
+    s = speak("N123AB, runway 22R, turn left heading 090, altimeter 29.92, maintain 10000.")
+    assert s.startswith("November one two three Alpha Bravo")
+    assert "runway two two right" in s
+    assert "heading zero niner zero" in s
+    assert "altimeter two niner niner two" in s
+    assert "one zero thousand" in s
+
+
+def test_callsigns():
+    assert callsign("American 1234") == "American twelve thirty four"
+    assert callsign("Cessna 3AB") == "Cessna three Alpha Bravo"
+    assert normalize_callsign("november one two three alpha bravo") == "N123AB"
+    assert normalize_callsign("united one two three") == "United 123"
+
+
+def test_readback_numbers():
+    atc = "United 123, cleared to Boston via radar vectors, then as filed. Climb and maintain 2500, " \
+          "expect FL230 10 minutes after departure. Departure frequency 119.2, squawk 4512."
+    assert check(atc, "radar vectors as filed, 2,500, one one niner point two, squawk four five one two")[1] == []
+    assert check(atc, "radar vectors as filed, five thousand, 119.2, squawk 4512")[1] == ["2500"]
+    assert check("United 123, runway 22R, taxi via B.", "22 left via bravo")[1] == ["runway 22 right"]
+
+
+def test_hemispheric_altitudes():
+    assert _legal(23000, True) == 23000 and _legal(22000, True) == 23000
+    assert _legal(35000, False) == 36000 and _legal(9000, False) == 10000
+    assert aircraft_class("C172") == "piston" and aircraft_class("A320") == "jet"
+
+
+def test_ulaw_roundtrip():
+    x = (np.sin(np.linspace(0, 200, 8000)) * 12000).astype(np.int16)
+    y = ulaw_decode(ulaw_encode(x))
+    assert np.max(np.abs(y.astype(int) - x)) < 600
+
+
+def test_dtmf_detect():
+    t = np.arange(160) / 8000
+    tone = ((np.sin(2 * np.pi * 697 * t) + np.sin(2 * np.pi * 1209 * t)) * 8000).astype(np.int16)
+    voice = (np.sin(2 * np.pi * 220 * t) * 8000).astype(np.int16)
+    assert is_dtmf_frame(tone) and not is_dtmf_frame(voice)
