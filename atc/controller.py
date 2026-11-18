@@ -246,14 +246,21 @@ class Controller:
                 await speak(fac, s)
 
         result = await self.brain.respond(messages, on_decision, on_sentence)
-        if (pilot and state["mode"] == "silent" and not state.get("advanced")
-                and result.get("readback", "none") == "none" and not _is_ack(event_text)):
-            # a request, question or check-in never goes unanswered
-            log.info("model went silent on a non-readback; asking again")
+        rb = result.get("readback", "none")
+        if pilot and state["mode"] == "silent" and not state.get("advanced") and (
+                rb == "incorrect" or (rb == "none" and not _is_ack(event_text))):
+            # a wrong readback always gets corrected; a request or check-in always gets an answer
+            log.info("model went silent (readback=%s); asking again", rb)
             state = {"mode": "speak", "spoken": [], "handoff": False}
-            messages[-1]["content"] += ("\n\nThis transmission is not a readback; it needs an answer from you. "
-                                        "action must be \"speak\".")
+            why = ("The readback was wrong: correct it now." if rb == "incorrect"
+                   else "This transmission is not a readback; it needs an answer from you.")
+            messages[-1]["content"] += f"\n\n{why} action must be \"speak\"."
+            if rb == "incorrect":
+                fs.readback_failures = max(0, fs.readback_failures - 1)  # don't count it twice
             result = await self.brain.respond(messages, on_decision, on_sentence)
+        items = result.get("readback_items") or []
+        if items and state["mode"] == "speak" and not state.get("handoff"):
+            fs.pending_readback = items
         self._apply_updates(result.get("updates") or {})
 
         if state["mode"] == "clearance":
@@ -347,9 +354,6 @@ class Controller:
         if handoff:
             fs.handoff_pending = True
             fs.pending_readback = [f"frequency {fs.next_facility.freq}"]
-        items = d.get("readback_items") or []
-        if items and not handoff:
-            fs.pending_readback = items
         fs.expects_reply = bool(d.get("expects_reply")) and not handoff
 
     def _template(self, state: dict, text: str) -> None:

@@ -75,14 +75,14 @@ class FakeTwilio:
     async def dtmf(self, d: str):
         await self.ws.send(json.dumps({"event": "dtmf", "streamSid": "MZtest", "dtmf": {"digit": d}}))
 
-    async def send_pcm(self, pcm8k: np.ndarray, realtime: float = 4.0):
+    async def send_pcm(self, pcm8k: np.ndarray, realtime: float = 1.0):
         data = ulaw_encode(pcm8k)
         for i in range(0, len(data), 160):
             await self.ws.send(json.dumps({"event": "media", "streamSid": "MZtest",
                                            "media": {"track": "inbound", "payload": base64.b64encode(data[i:i + 160]).decode()}}))
             await asyncio.sleep(0.02 / realtime)
 
-    async def silence(self, seconds: float, realtime: float = 4.0):
+    async def silence(self, seconds: float, realtime: float = 1.0):
         await self.send_pcm(np.zeros(int(seconds * PHONE_RATE), dtype=np.int16), realtime)
 
     async def wait_quiet(self, timeout: float) -> bool:

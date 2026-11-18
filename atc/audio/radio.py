@@ -128,3 +128,54 @@ def silence(seconds: float) -> np.ndarray:
 def to_phone(x16k: np.ndarray) -> np.ndarray:
     """16 kHz float -> 8 kHz int16 for the phone line."""
     return to_int16(resample(x16k, WORK_RATE, PHONE_RATE))
+
+
+class RadioStream:
+    """The same radio chain as apply_radio, but stateful, for audio that arrives in chunks.
+
+    Filters carry their state across chunks, level is tracked with a slow AGC instead
+    of whole-clip normalization, and output is decimated to 8 kHz for the phone line.
+    """
+
+    def __init__(self, profile: RadioProfile, seed: int | None = None):
+        from scipy.signal import sosfilt_zi
+
+        self.p = profile
+        self.rng = np.random.default_rng(seed)
+        self.bp1 = _bandpass(profile.low_hz, profile.high_hz, WORK_RATE)
+        self.bp2 = _bandpass(profile.low_hz * 0.9, min(profile.high_hz * 1.1, 3400), WORK_RATE)
+        self.hiss_sos = _bandpass(500, 3000, WORK_RATE)
+        self.dec = butter(8, 3500, btype="lowpass", fs=WORK_RATE, output="sos")
+        self.z1 = sosfilt_zi(self.bp1) * 0
+        self.z2 = sosfilt_zi(self.bp2) * 0
+        self.zh = sosfilt_zi(self.hiss_sos) * 0
+        self.zd = sosfilt_zi(self.dec) * 0
+        self.peak = 0.25
+        self.phase = 0
+        # bandpassed unit white noise has a peak of roughly 4 * 0.55; scale to match _hiss()
+        self.hiss_gain = 10 ** (profile.hiss_db / 20.0) / 2.2
+
+    def process(self, chunk: np.ndarray, rate: int) -> np.ndarray:
+        """float audio chunk at `rate` -> int16 8 kHz chunk."""
+        x = chunk.astype(np.float32)
+        if rate != WORK_RATE:
+            x = resample(x, rate, WORK_RATE)
+        if len(x) == 0:
+            return np.zeros(0, dtype=np.int16)
+        self.peak = max(self.peak * 0.995, float(np.max(np.abs(x))))
+        x = x / self.peak
+        x, self.z1 = sosfilt(self.bp1, x, zi=self.z1)
+        x = np.tanh(x * self.p.drive) / np.tanh(self.p.drive)
+        x, self.z2 = sosfilt(self.bp2, x, zi=self.z2)
+        x = x * self.p.level
+        noise, self.zh = sosfilt(self.hiss_sos, self.rng.standard_normal(len(x)), zi=self.zh)
+        x = x + noise * self.hiss_gain
+        if self.p.crackle > 0:
+            frame = WORK_RATE // 50
+            for i in range(0, len(x) - 40, frame):
+                if self.rng.random() < self.p.crackle:
+                    x[i : i + 40] += self.rng.standard_normal(40) * np.exp(-np.arange(40) / 6.0) * 0.25
+        x, self.zd = sosfilt(self.dec, x, zi=self.zd)
+        out = x[self.phase :: 2]
+        self.phase = (self.phase - len(x)) % 2
+        return to_int16(out)

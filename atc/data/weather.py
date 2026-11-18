@@ -144,6 +144,10 @@ async def get_weather(ap: Airport) -> Weather:
     hit = _CACHE.get(ap.ident)
     if hit and time.time() - hit[0] < CACHE_S:
         return hit[1]
+    if hit:
+        # stale: answer with what we have and refresh in the background, never make ATC wait
+        prefetch(ap)
+        return hit[1]
     task = _INFLIGHT.get(ap.ident)
     if task is None:
         task = asyncio.ensure_future(_fetch(ap))
@@ -189,7 +193,14 @@ async def _fetch(ap: Airport) -> Weather:
             except Exception:
                 log.exception("bad METAR for %s", ap.ident)
     if wx is None:
+        prev = _CACHE.get(ap.ident)
+        if prev and not prev[1].synthetic:
+            # keep the last real observation; retry in a couple of minutes
+            _CACHE[ap.ident] = (now - CACHE_S + 120, prev[1])
+            return prev[1]
         wx = _standard(ap.ident)
+        _CACHE[ap.ident] = (now - CACHE_S + 120, wx)
+        return wx
     _CACHE[ap.ident] = (now, wx)
     return wx
 

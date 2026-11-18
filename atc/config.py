@@ -30,7 +30,11 @@ class Settings:
     llm_fallback_model: str = field(default_factory=lambda: os.getenv("LLM_FALLBACK_MODEL", "gpt-4.1-mini-2025-04-14"))
     llm_reasoning_effort: str = field(default_factory=lambda: os.getenv("LLM_REASONING_EFFORT", "none"))
     llm_timeout: float = field(default_factory=lambda: _float("LLM_TIMEOUT", 8.0))
-    stt_model: str = field(default_factory=lambda: os.getenv("STT_MODEL", "gpt-transcribe"))
+    stt_model: str = field(default_factory=lambda: os.getenv("STT_MODEL", "gpt-transcribe"))  # fallback STT
+
+    # Deepgram (streaming STT + Aura-2 voices); without a key, falls back to OpenAI STT + local Piper
+    deepgram_api_key: str = field(default_factory=lambda: os.getenv("DEEPGRAM_API_KEY", ""))
+    deepgram_stt_model: str = field(default_factory=lambda: os.getenv("DEEPGRAM_STT_MODEL", "nova-3"))
 
     # Twilio
     twilio_auth_token: str = field(default_factory=lambda: os.getenv("TWILIO_AUTH_TOKEN", ""))

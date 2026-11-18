@@ -37,7 +37,7 @@ frequencies, squawk codes, approach clearances, and the IFR clearance items (des
 - FACTS.number_check is a reliable machine check of the numbers in his readback against your last instruction. If missing_or_wrong is non-empty, the readback is incorrect: correct exactly those items. If it is empty, every number was right: do NOT call the readback incorrect over wording, word order or phrasing.
 - Judge the pilot's transmission against PENDING READBACK in FACTS. Speech recognition may garble a word or format numbers \
 oddly ("one one niner point two" = 119.2, "22 right" = 22R); judge the numbers he actually said, not spelling.
-- Missing or wrong item: readback="incorrect", correct exactly that item ("United 123, negative, maintain 5000" / \
+- Missing or wrong item: readback="incorrect" and action="speak" (never silent), correct exactly that item ("United 123, negative, maintain 5000" / \
 "United 123, readback incorrect, squawk 4512"). A wrong readback NEVER gets a handoff.
 - action="silent" is ONLY for a correct readback or a bare acknowledgment ("roger", "wilco"). A request, question, \
 report or check-in ALWAYS gets an answer. If he asks for something already given (e.g. a clearance he already has), \
@@ -69,11 +69,11 @@ OUTPUT: fill the JSON fields.
 - action: "speak" (say something), "silent" (no transmission), "issue_clearance" (only Clearance Delivery, when the \
 system should read the IFR clearance; leave say empty).
 - readback: was the pilot's transmission a readback, and was it correct.
-- readback_items: the items the pilot must read back from YOUR transmission now (empty if none).
 - expects_reply: true if you asked a question or gave an instruction that needs a readback.
 - handoff: true ONLY if this transmission tells the pilot to contact the next facility in FACTS.
 - flight_complete: true only when your duties say the flight is finished.
 - say: the transmission text (empty when silent or issue_clearance).
+- readback_items: the items the pilot must read back from YOUR transmission now (empty if none).
 - updates: ONLY what is new this turn (from the pilot or assigned by you now); null for everything else.
 """
 
@@ -223,11 +223,11 @@ SCHEMA = {
     "properties": {
         "action": {"type": "string", "enum": ["speak", "silent", "issue_clearance"]},
         "readback": {"type": "string", "enum": ["none", "correct", "incorrect"]},
-        "readback_items": {"type": "array", "items": {"type": "string"}},
         "expects_reply": {"type": "boolean"},
         "handoff": {"type": "boolean"},
         "flight_complete": {"type": "boolean"},
         "say": {"type": "string"},
+        "readback_items": {"type": "array", "items": {"type": "string"}},
         "updates": {
             "type": "object",
             "additionalProperties": False,
@@ -246,5 +246,5 @@ SCHEMA = {
                          "assigned_altitude", "assigned_heading", "taxi_route"],
         },
     },
-    "required": ["action", "readback", "readback_items", "expects_reply", "handoff", "flight_complete", "say", "updates"],
+    "required": ["action", "readback", "expects_reply", "handoff", "flight_complete", "say", "readback_items", "updates"],
 }

@@ -55,8 +55,10 @@ async def lifespan(app: FastAPI):
     tts = get_tts()
     tts.warm()
     app.state.svc = Services(db=db, tts=tts, stt=STT(), store=Store(settings.data_dir / "flights.db"))
-    log.info("ready")
+    log.info("ready (voices: %s)", "Deepgram Aura-2" if settings.deepgram_api_key else "local Piper")
     yield
+    if tts._dg is not None:
+        await tts._dg.aclose()
 
 
 app = FastAPI(lifespan=lifespan)

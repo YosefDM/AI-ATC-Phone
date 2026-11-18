@@ -24,7 +24,7 @@ from fastapi import WebSocket
 
 from .audio import radio
 from .audio.codec import FRAME_SAMPLES, PHONE_RATE, resample, to_int16, ulaw_decode, ulaw_encode
-from .audio.detect import SpeechDetector, mute_dtmf
+from .audio.detect import SpeechDetector, is_dtmf_frame, mute_dtmf
 from .config import settings
 from .controller import Controller
 from .data.airports import AirportDB
@@ -32,7 +32,8 @@ from .data.weather import active_runway, atis_spoken, get_weather, prefetch
 from .flight import Facility, FlightState, start_flight
 from .speech import spoken
 from .speech.stt import STT
-from .speech.tts import ATIS_VOICE, SYSTEM_VOICE, TTS, Voice
+from .speech import deepgram
+from .speech.tts import TTS, Voice, atis_voice, resolve, system_voice
 from .store import Store
 
 log = logging.getLogger(__name__)
@@ -66,6 +67,7 @@ class CallSession:
         self.tx_started = 0.0
         self.preroll: collections.deque[np.ndarray] = collections.deque(maxlen=max(1, int(settings.preroll_s / 0.02)))
         self.detector = SpeechDetector()
+        self.live: deepgram.LiveTranscriber | None = None  # streaming STT for the current transmission
 
         # outbound playback
         self.pending_marks: set[str] = set()
@@ -128,6 +130,7 @@ class CallSession:
             self.preroll.append(frame)
             return
         self.tx_frames.append(frame)
+        self._stream_frame(frame)
         self.detector.push(frame)
         elapsed = time.monotonic() - self.tx_started
         d = self.detector
@@ -137,6 +140,11 @@ class CallSession:
             await self._end_tx("no speech")
         elif elapsed > settings.max_transmission_s:
             await self._end_tx("max length")
+
+    def _stream_frame(self, frame: np.ndarray) -> None:
+        if self.live is not None:
+            # keypad tones are blanked so the recognizer never hears the beeps
+            self.live.send(b"\xff" * len(frame) if is_dtmf_frame(frame) else ulaw_encode(frame))
 
     async def on_dtmf(self, digit: str) -> None:
         log.info("dtmf %s", digit)
@@ -185,6 +193,11 @@ class CallSession:
         self.tx_frames = list(self.preroll)  # keep the half second before the key press
         self.preroll.clear()
         self.detector.reset()
+        if deepgram.enabled() and self.fs:
+            self.live = deepgram.LiveTranscriber(self._stt_terms())
+            self.live.start()
+            for f in self.tx_frames:
+                self._stream_frame(f)
         await self.send_audio(radio.to_phone(radio.mic_click()), mark=False)
 
     async def _end_tx(self, reason: str) -> None:
@@ -196,12 +209,15 @@ class CallSession:
         heard = self.detector.heard_speech
         log.info("transmission ended (%s), %.1fs, speech=%s", reason, len(frames) * 0.02, heard)
         await self.send_audio(radio.to_phone(radio.squelch_tail()), mark=False)
+        live, self.live = self.live, None
         if not heard:
+            if live:
+                asyncio.create_task(live.close())
             return
         if self.ctl:
             self.ctl.touch()
         pcm = np.concatenate(mute_dtmf(frames)) if frames else np.zeros(0, dtype=np.int16)
-        self.work = asyncio.create_task(self._handle_pilot(pcm))
+        self.work = asyncio.create_task(self._handle_pilot(pcm, live))
 
     async def cancel_work(self) -> None:
         if self.work and not self.work.done():
@@ -216,26 +232,31 @@ class CallSession:
 
     def _stt_terms(self) -> list[str]:
         fs = self.fs
-        terms = [fs.callsign or "", fs.facility.name, fs.facility.freq]
+        terms = [fs.callsign or "", fs.facility.name]
         if fs.next_facility:
-            terms += [fs.next_facility.name, fs.next_facility.freq]
-        for k in ("dep_runway", "arr_runway", "squawk"):
-            v = getattr(fs, k)
-            if v:
-                terms.append(str(v))
+            terms.append(fs.next_facility.name)
+        dest = self.svc.db.get(fs.destination) if fs.destination else None
+        if dest:
+            terms.append(dest.spoken_name)
         return terms
 
-    async def _handle_pilot(self, pcm: np.ndarray) -> None:
+    async def _handle_pilot(self, pcm: np.ndarray, live: deepgram.LiveTranscriber | None = None) -> None:
         t0 = time.monotonic()
-        text = await self.svc.stt.transcribe(pcm, self._stt_terms())
+        text = await live.finish() if live else None
+        if text is None:  # no streaming STT, or it failed: transcribe the clip
+            terms = self._stt_terms() + ([self.fs.facility.freq] if self.fs else [])
+            text = await self.svc.stt.transcribe(pcm, terms)
         t1 = time.monotonic()
         calls_log.info("[%s] PILOT (%s): %s", self.fs.id, self.fs.facility.name, text or "(unintelligible)")
         out = Outgoing(self)
         try:
             await self.ctl.pilot(text, out.speak)
+        except asyncio.CancelledError:
+            out.abort()
+            raise
         except Exception:
             log.exception("controller failed")
-            if not out.started:
+            if not out.queued:
                 await out.speak(self.fs.facility, f"{self.fs.callsign or 'Aircraft calling'}, stand by.")
         await out.finish()
         log.info("turn: stt %.2fs, first audio %.2fs after key-up, total %.2fs", t1 - t0,
@@ -246,6 +267,9 @@ class CallSession:
         out = Outgoing(self)
         try:
             await self.ctl.event(kind, out.speak)
+        except asyncio.CancelledError:
+            out.abort()
+            raise
         except Exception:
             log.exception("controller event failed")
         await out.finish()
@@ -277,11 +301,15 @@ class CallSession:
         await self.cancel_work()
         ap, wx = await self.ctl.atis_airport()
         text = atis_spoken(ap, wx, active_runway(ap, wx, "dep"), active_runway(ap, wx, "arr"))
-        audio = await self._synth(text, ATIS_VOICE)
         prof = radio.profile_for(f"{ap.ident}-ATIS", "ATIS")
-        x = np.concatenate([radio.key_up(prof), radio.apply_radio(*audio, prof), radio.squelch_tail()])
+        rs = radio.RadioStream(prof)
         self.playing = "atis"
-        await self.send_audio(radio.to_phone(x))
+        await self.send_audio(radio.to_phone(radio.key_up(prof)), mark=False)
+        async for chunk, rate in self.svc.tts.stream(text, atis_voice()):
+            if self.playing != "atis":
+                return  # stopped by a key press
+            await self.send_audio(rs.process(chunk, rate), mark=False)
+        await self.send_audio(radio.to_phone(radio.squelch_tail()))
 
     async def help(self) -> None:
         fac = self.fs.facility
@@ -294,14 +322,11 @@ class CallSession:
 
     async def system(self, text: str, wait: bool = False) -> None:
         """Out-of-radio prompts, in a clean narrator voice."""
-        audio, rate = await self._synth(text, SYSTEM_VOICE)
+        audio, rate = await self.svc.tts.synthesize_async(text, system_voice())
         x = resample(audio, rate, PHONE_RATE)
         x = x / (np.max(np.abs(x)) + 1e-9) * 0.55
         self.playing = "system"
         await self.send_audio(to_int16(x))
-
-    async def _synth(self, text: str, voice: Voice) -> tuple[np.ndarray, int]:
-        return await self.loop.run_in_executor(None, self.svc.tts.synthesize, text, voice)
 
     # ------------------------------------------------------------ outbound plumbing
 
@@ -332,34 +357,61 @@ class CallSession:
 
 
 class Outgoing:
-    """One ATC transmission, sent sentence by sentence as the model writes it."""
+    """One ATC transmission. Sentences are queued as the model writes them and voiced in
+    order by a worker, so the model never waits on audio and audio never waits on the model."""
 
     def __init__(self, call: CallSession):
         self.call = call
+        self.queue: asyncio.Queue = asyncio.Queue()
+        self.worker: asyncio.Task | None = None
+        self.queued = False
         self.started = False
-        self.profile = None
         self.first_audio_at: float | None = None
 
     async def speak(self, fac: Facility, sentence: str) -> None:
+        calls_log.info("[%s] ATC %s: %s", self.call.fs.id, fac.name, sentence)
+        self.queued = True
+        self.queue.put_nowait((fac, sentence))
+        if self.worker is None:
+            self.worker = asyncio.create_task(self._run())
+
+    async def _run(self) -> None:
         call = self.call
-        fs = call.fs
-        calls_log.info("[%s] ATC %s: %s", fs.id, fac.name, sentence)
-        text = spoken.speak(sentence, fs.callsign)
-        voice = fs.voice_for(fac) if fac.voice else Voice("en_US-libritts_r-medium", 0)
-        audio, rate = await call._synth(text, voice)
-        if self.profile is None:
-            self.profile = radio.profile_for(fac.id, fac.kind)
-        x = radio.apply_radio(audio, rate, self.profile)
-        if not self.started:
-            x = np.concatenate([radio.key_up(self.profile), x])
-            self.started = True
-            self.first_audio_at = time.monotonic()
-        else:
-            x = np.concatenate([radio.silence(0.12) + radio._hiss(int(0.12 * radio.WORK_RATE), self.profile.hiss_db,
-                                                                 np.random.default_rng()), x])
-        call.playing = "atc"
-        await call.send_audio(radio.to_phone(x), mark=False)
+        stream: radio.RadioStream | None = None
+        while True:
+            item = await self.queue.get()
+            if item is None:
+                return
+            fac, sentence = item
+            text = spoken.speak(sentence, call.fs.callsign)
+            voice = resolve(call.fs.voice_for(fac)) if fac.voice else system_voice()
+            if stream is None:
+                profile = radio.profile_for(fac.id, fac.kind)
+                stream = radio.RadioStream(profile)
+                call.playing = "atc"
+                await call.send_audio(radio.to_phone(radio.key_up(profile)), mark=False)
+            try:
+                async for chunk, rate in call.svc.tts.stream(text, voice):
+                    pcm = stream.process(chunk, rate)
+                    if not self.started:
+                        self.started = True
+                        self.first_audio_at = time.monotonic()
+                    call.playing = "atc"
+                    await call.send_audio(pcm, mark=False)
+            except Exception:
+                log.exception("voicing failed: %s", sentence)
+
+    def abort(self) -> None:
+        if self.worker and not self.worker.done():
+            self.worker.cancel()
 
     async def finish(self) -> None:
+        if self.worker is None:
+            return
+        self.queue.put_nowait(None)
+        try:
+            await self.worker
+        except asyncio.CancelledError:
+            return
         if self.started:
             await self.call.send_audio(radio.to_phone(radio.squelch_tail()), mark=True)
