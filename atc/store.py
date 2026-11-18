@@ -20,6 +20,7 @@ class Store:
             self._db.execute(
                 "CREATE TABLE IF NOT EXISTS flights (id TEXT PRIMARY KEY, caller TEXT, updated REAL, complete INTEGER, data TEXT)")
             self._db.execute("CREATE INDEX IF NOT EXISTS flights_caller ON flights(caller, updated)")
+            self._db.execute("CREATE TABLE IF NOT EXISTS guests (number TEXT PRIMARY KEY, added_by TEXT, added_at REAL)")
             self._db.commit()
 
     def save(self, fs: FlightState) -> None:
@@ -44,3 +45,30 @@ class Store:
     def abandon(self, fs: FlightState) -> None:
         fs.complete = True
         self.save(fs)
+
+    # ------------------------------------------------------------ guest callers (added by phone)
+
+    @staticmethod
+    def norm(number: str) -> str:
+        d = "".join(c for c in number if c.isdigit())
+        return d[-10:]
+
+    def is_guest(self, number: str) -> bool:
+        with self._lock:
+            return self._db.execute("SELECT 1 FROM guests WHERE number = ?", (self.norm(number),)).fetchone() is not None
+
+    def add_guest(self, number: str, added_by: str) -> None:
+        with self._lock:
+            self._db.execute("INSERT OR REPLACE INTO guests (number, added_by, added_at) VALUES (?, ?, ?)",
+                             (self.norm(number), self.norm(added_by), time.time()))
+            self._db.commit()
+
+    def remove_guest(self, number: str) -> bool:
+        with self._lock:
+            cur = self._db.execute("DELETE FROM guests WHERE number = ?", (self.norm(number),))
+            self._db.commit()
+            return cur.rowcount > 0
+
+    def guests(self) -> list[tuple[str, str, float]]:
+        with self._lock:
+            return self._db.execute("SELECT number, added_by, added_at FROM guests ORDER BY added_at").fetchall()

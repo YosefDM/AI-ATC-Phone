@@ -42,6 +42,13 @@ class Settings:
     allowed_callers: list[str] = field(default_factory=lambda: _list("ALLOWED_CALLERS"))
     app_secret: str = field(default_factory=lambda: os.getenv("APP_SECRET") or secrets.token_hex(32))
 
+    # Owners (ALLOWED_CALLERS) can add guest callers from the keypad; ADMIN_TOKEN guards /admin
+    max_guests: int = field(default_factory=lambda: int(os.getenv("MAX_GUESTS", "25")))
+    admin_token: str = field(default_factory=lambda: os.getenv("ADMIN_TOKEN", ""))
+    record_calls: bool = field(default_factory=lambda: os.getenv("RECORD_CALLS", "1") not in ("0", "false", "no"))
+    keep_recordings: int = field(default_factory=lambda: int(os.getenv("KEEP_RECORDINGS", "150")))
+    chatter_default: str = field(default_factory=lambda: os.getenv("CHATTER", "light"))  # off / light / busy
+
     # Flight
     home_airport: str = field(default_factory=lambda: os.getenv("HOME_AIRPORT", "KEWR"))
     resume_window_s: float = field(default_factory=lambda: _float("RESUME_WINDOW_MIN", 120) * 60)
@@ -51,6 +58,8 @@ class Settings:
     atis_key: str = field(default_factory=lambda: os.getenv("ATIS_KEY", "9"))
     new_flight_key: str = field(default_factory=lambda: os.getenv("NEW_FLIGHT_KEY", "*"))
     help_key: str = field(default_factory=lambda: os.getenv("HELP_KEY", "0"))
+    chatter_key: str = field(default_factory=lambda: os.getenv("CHATTER_KEY", "7"))
+    menu_key: str = field(default_factory=lambda: os.getenv("MENU_KEY", "#"))
     silence_stop_s: float = field(default_factory=lambda: _float("SILENCE_STOP_S", 2.0))
     no_speech_timeout_s: float = field(default_factory=lambda: _float("NO_SPEECH_TIMEOUT_S", 8.0))
     max_transmission_s: float = field(default_factory=lambda: _float("MAX_TRANSMISSION_S", 30.0))

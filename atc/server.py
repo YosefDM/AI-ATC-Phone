@@ -17,7 +17,7 @@ from contextlib import asynccontextmanager
 from xml.sax.saxutils import quoteattr
 
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import PlainTextResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Response
 
 from .call import CallSession, Services
 from .config import settings
@@ -77,6 +77,59 @@ def _signature_ok(request: Request, params: dict) -> bool:
     return RequestValidator(settings.twilio_auth_token).validate(url, params, request.headers.get("X-Twilio-Signature", ""))
 
 
+def _allowed(app_: FastAPI, caller: str) -> bool:
+    """Owners (ALLOWED_CALLERS) plus guests they added from the keypad."""
+    return settings.caller_allowed(caller) or app_.state.svc.store.is_guest(caller)
+
+
+# ---------------------------------------------------------------- admin (call review)
+
+
+def _admin(request: Request) -> None:
+    from fastapi import HTTPException
+
+    token = request.headers.get("Authorization", "").removeprefix("Bearer ").strip()
+    if not settings.admin_token or not hmac.compare_digest(token, settings.admin_token):
+        raise HTTPException(status_code=404)
+
+
+@app.get("/admin/transcripts")
+async def admin_transcripts(request: Request, lines: int = 400):
+    _admin(request)
+    path = settings.log_dir / "transcripts.log"
+    if not path.exists():
+        return PlainTextResponse("")
+    text = path.read_text(errors="replace").splitlines()[-max(1, min(lines, 20000)):]
+    return PlainTextResponse("\n".join(text))
+
+
+@app.get("/admin/calls")
+async def admin_calls(request: Request):
+    _admin(request)
+    d = settings.data_dir / "recordings"
+    files = sorted(d.glob("*.wav"), reverse=True) if d.exists() else []
+    return JSONResponse([{"name": f.stem, "bytes": f.stat().st_size} for f in files])
+
+
+@app.get("/admin/calls/{name}")
+async def admin_call_file(request: Request, name: str):
+    from fastapi import HTTPException
+
+    _admin(request)
+    d = (settings.data_dir / "recordings").resolve()
+    path = (d / name).resolve()
+    if path.parent != d or path.suffix not in (".wav", ".json") or not path.exists():
+        raise HTTPException(status_code=404)
+    return FileResponse(path)
+
+
+@app.get("/admin/guests")
+async def admin_guests(request: Request):
+    _admin(request)
+    return JSONResponse([{"number_last4": n[-4:], "added_by_last4": b[-4:], "added_at": t}
+                         for n, b, t in request.app.state.svc.store.guests()])
+
+
 @app.get("/health")
 async def health():
     return PlainTextResponse("ok")
@@ -90,7 +143,7 @@ async def voice(request: Request):
         return Response(status_code=403)
     caller = str(form.get("From", ""))
     call_sid = str(form.get("CallSid", ""))
-    if not settings.caller_allowed(caller):
+    if not _allowed(request.app, caller):
         log.info("rejected call from %s", caller)
         return Response('<?xml version="1.0" encoding="UTF-8"?><Response><Reject reason="rejected"/></Response>',
                         media_type="application/xml")
@@ -130,7 +183,7 @@ async def media(ws: WebSocket):
                 params = start.get("customParameters") or {}
                 caller, token = params.get("caller", ""), params.get("token", "")
                 call_sid = start.get("callSid", "")
-                if not hmac.compare_digest(token, _token(call_sid, caller)) or not settings.caller_allowed(caller):
+                if not hmac.compare_digest(token, _token(call_sid, caller)) or not _allowed(ws.app, caller):
                     log.warning("media stream with bad token for %s", call_sid)
                     await ws.close()
                     return

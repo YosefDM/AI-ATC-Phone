@@ -5,7 +5,9 @@ Clearance → Ground → Tower → Departure → Center(s) → Approach → Towe
 
 - **Push-to-talk on the keypad:** press `1` (mic click), talk, then press `1` again (squelch tail).
   If you forget the second press, about 2 seconds of silence ends the transmission.
-- `9` plays the ATIS, `0` gives help (which frequency you're on), and `*` twice starts a new flight.
+- `9` plays the ATIS, `0` gives help (which frequency you're on), `7` cycles background traffic
+  (off, light or busy), and `*` twice starts a new flight.
+- `#` opens the phone list (owners only). Add or remove guest callers from the keypad.
 - Every flight departs the home airport (`HOME_AIRPORT`, default KEWR). File by voice with Clearance:
   *"Newark Clearance, United 123, A320, IFR to Boston with information Whiskey."*
 - Real airports, runways and frequencies come from OurAirports, live weather from aviationweather.gov,
@@ -13,15 +15,20 @@ Clearance → Ground → Tower → Departure → Center(s) → Approach → Towe
 - Each facility has its own voice through a VHF radio effect. Readbacks are checked strictly, and a
   wrong readback blocks the handoff.
 - If you hang up mid-flight and call back within 2 hours, you resume where you left off.
+- Background traffic: other aircraft working your controller, in the same controller voice. It
+  always leaves him a gap to talk, and keying up cuts it off.
+- Every call is recorded (stereo: caller left, ATC right) with a timed event log, and can be
+  reviewed through `/admin/*` (Bearer `ADMIN_TOKEN`).
 
 ## How it works
 
-Twilio Media Streams carries the raw 8 kHz call audio over a websocket. Each keyed transmission is
-transcribed as one clip (`gpt-transcribe`, primed with aviation vocabulary). Code owns the facts: runway,
+Twilio Media Streams carries the raw 8 kHz call audio over a websocket. While he holds the mic,
+audio streams to Deepgram (nova-3, boosted with aviation terms and his callsign), so the transcript
+is ready about 0.15 s after he lets go. `gpt-transcribe` is the fallback. Code owns the facts: runway,
 squawk, frequencies, altitudes and the facility sequence. The model (`gpt-5.4-mini`) only does the talking
 and returns structured decisions, which the state machine checks. A deterministic readback checker
-verifies the numbers. Replies stream sentence by sentence into local Piper TTS, then through the radio
-filter, and back to the phone.
+verifies the numbers. Replies stream sentence by sentence into Deepgram Aura-2 voices (local Piper is the
+fallback), through a streaming VHF radio filter, and back to the phone.
 
 | Path | What |
 |---|---|

@@ -1,0 +1,83 @@
+{
+ "call_sid": "CAtest",
+ "caller_last4": "0100",
+ "flight_id": "86d6c7f01665",
+ "started": "20261118-220503",
+ "duration_s": 3.0,
+ "channels": {
+  "left": "caller",
+  "right": "played to caller"
+ },
+ "events": [
+  {
+   "t": 0.0,
+   "kind": "key",
+   "digit": "#"
+  },
+  {
+   "t": 0.0,
+   "kind": "key",
+   "digit": "1"
+  },
+  {
+   "t": 0.0,
+   "kind": "key",
+   "digit": "2"
+  },
+  {
+   "t": 0.0,
+   "kind": "key",
+   "digit": "0"
+  },
+  {
+   "t": 0.0,
+   "kind": "key",
+   "digit": "1"
+  },
+  {
+   "t": 0.0,
+   "kind": "key",
+   "digit": "5"
+  },
+  {
+   "t": 0.0,
+   "kind": "key",
+   "digit": "5"
+  },
+  {
+   "t": 0.0,
+   "kind": "key",
+   "digit": "5"
+  },
+  {
+   "t": 0.0,
+   "kind": "key",
+   "digit": "0"
+  },
+  {
+   "t": 0.0,
+   "kind": "key",
+   "digit": "1"
+  },
+  {
+   "t": 0.0,
+   "kind": "key",
+   "digit": "9"
+  },
+  {
+   "t": 0.0,
+   "kind": "key",
+   "digit": "9"
+  },
+  {
+   "t": 0.0,
+   "kind": "key",
+   "digit": "#"
+  },
+  {
+   "t": 0.0,
+   "kind": "key",
+   "digit": "1"
+  }
+ ]
+}

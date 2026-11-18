@@ -59,3 +59,25 @@ def test_dtmf_detect():
     tone = ((np.sin(2 * np.pi * 697 * t) + np.sin(2 * np.pi * 1209 * t)) * 8000).astype(np.int16)
     voice = (np.sin(2 * np.pi * 220 * t) * 8000).astype(np.int16)
     assert is_dtmf_frame(tone) and not is_dtmf_frame(voice)
+
+
+def test_chatter_every_facility():
+    import random
+
+    from atc.chatter import exchange
+    from atc.data.airports import get_db
+    from atc.data.weather import _standard
+    from atc.flight import build_plan, start_flight
+
+    db = get_db()
+    dep = db.get("KEWR")
+    fs = start_flight("+1", dep)
+    fs.callsign, fs.aircraft_type = "United 123", "A320"
+    build_plan(fs, db, dep, db.get("KBOS"), _standard("x"), _standard("y"))
+    rng = random.Random(1)
+    for i in range(len(fs.facilities)):
+        fs.idx = i
+        for _ in range(20):
+            lines = exchange(fs, rng)
+            assert lines and all(ln.text for ln in lines)
+            assert all(not ln.callsign.startswith("United") for ln in lines)
