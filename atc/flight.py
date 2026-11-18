@@ -85,6 +85,8 @@ class FlightState:
     progress_nudges: int = 0
     exchanges: int = 0  # pilot transmissions handled by the current facility
     last_atc_text: str = ""
+    readback_ref: str = ""  # the ATC transmission his next readback is checked against
+    emergency: dict | None = None  # set when he declares one: shared by every facility
     last_activity: float = field(default_factory=time.time)
     history: list[Turn] = field(default_factory=list)
 
@@ -120,6 +122,7 @@ class FlightState:
             self.idx += 1
         self.handoff_pending = False
         self.pending_readback = []
+        self.readback_ref = ""
         self.readback_failures = 0
         self.expects_reply = False
         self.no_response_count = 0

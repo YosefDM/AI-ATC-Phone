@@ -40,7 +40,7 @@ async def main(a) -> None:
     ap, wx = await ctl.atis_airport()
     sysmsg = PILOT.format(cs=a.callsign, typ=a.type, dep=fs.departure, dest=a.dest, atis=wx.atis_word,
                           mistakes=("Make a wrong readback (wrong number) about once every 4 readbacks, then correct it "
-                                    "when ATC corrects you." if a.mistakes else ""))
+                                    "when ATC corrects you." if a.mistakes else "") + " " + a.scenario)
     convo = [{"role": "system", "content": sysmsg}]
     heard: list[str] = []
 
@@ -87,4 +87,5 @@ if __name__ == "__main__":
     p.add_argument("type")
     p.add_argument("callsign")
     p.add_argument("--mistakes", action="store_true")
+    p.add_argument("--scenario", default="", help="extra instructions for the pilot, e.g. an emergency to declare")
     asyncio.run(main(p.parse_args()))

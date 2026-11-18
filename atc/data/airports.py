@@ -29,9 +29,9 @@ OVERRIDES: dict[str, dict] = {
     "KBOS": {"radio_name": "Boston", "spoken_name": "Boston Logan"},
     "KORD": {"radio_name": "O'Hare", "spoken_name": "Chicago O'Hare", "radar_name": "Chicago"},
     "KMDW": {"radio_name": "Midway", "spoken_name": "Chicago Midway", "radar_name": "Chicago"},
-    "KDCA": {"radio_name": "National", "spoken_name": "Washington National"},
-    "KIAD": {"radio_name": "Dulles", "spoken_name": "Dulles"},
-    "KBWI": {"radio_name": "Baltimore", "spoken_name": "Baltimore"},
+    "KDCA": {"radio_name": "National", "spoken_name": "Washington National", "radar_name": "Potomac"},
+    "KIAD": {"radio_name": "Dulles", "spoken_name": "Dulles", "radar_name": "Potomac"},
+    "KBWI": {"radio_name": "Baltimore", "spoken_name": "Baltimore", "radar_name": "Potomac"},
     "KPHL": {"radio_name": "Philadelphia", "spoken_name": "Philadelphia"},
     "KHPN": {"radio_name": "Westchester", "spoken_name": "Westchester"},
     "KISP": {"radio_name": "Islip", "spoken_name": "Islip"},
@@ -46,6 +46,10 @@ OVERRIDES: dict[str, dict] = {
     "KDEN": {"radio_name": "Denver", "spoken_name": "Denver"},
     "KLAS": {"radio_name": "Harry Reid", "spoken_name": "Las Vegas"},
 }
+
+# the data uses several spellings for the same job; "A/D" is a combined approach/departure frequency
+FREQ_KINDS = {"A/D": ["APP", "DEP"], "APP/DEP": ["APP", "DEP"], "ARR": ["APP"], "TOWER": ["TWR"], "GROUND": ["GND"],
+              "DEL": ["CLD"], "CLNC": ["CLD"], "CLR": ["CLD"]}
 
 _NAME_NOISE = re.compile(
     r"\b(international|intl|airport|regional|municipal|county|air terminal|field|memorial|executive|"
@@ -211,7 +215,8 @@ class AirportDB:
                 ap = self.get(row["airport_ident"])
                 mhz = _f(row["frequency_mhz"])
                 if ap and 108.0 <= mhz <= 137.0:  # VHF airband only; the data has some junk values
-                    ap.freqs.append(Freq(row["type"].upper(), row["description"], mhz))
+                    for kind in FREQ_KINDS.get(row["type"].upper().strip(), [row["type"].upper().strip()]):
+                        ap.freqs.append(Freq(kind, row["description"], mhz))
         log.info("loaded %d airports", len(self.by_ident))
 
     def get(self, code: str | None) -> Airport | None:

@@ -81,3 +81,22 @@ def test_chatter_every_facility():
             lines = exchange(fs, rng)
             assert lines and all(ln.text for ln in lines)
             assert all(not ln.callsign.startswith("United") for ln in lines)
+
+
+def test_routing_and_transcript_cleanup():
+    from atc.controller import EMERGENCY_RE, _addresses, clean_transcript
+    from atc.flight import Facility
+
+    dep = Facility("d", "DEP", "New York Departure", "119.2", None, "dep")
+    assert not _addresses("ready for takeoff, ifr departure", dep)
+    assert _addresses("newark departure, delta 556 with you", dep)
+    assert not _addresses("contact departure 119.2", dep)
+    assert clean_transcript("Cactus 1549er, ready") == "Cactus 1549, ready"
+    assert EMERGENCY_RE.search("mayday mayday mayday") and not EMERGENCY_RE.search("departure frequency")
+
+
+def test_combined_approach_departure_frequency():
+    from atc.data.airports import get_db
+
+    clt = get_db().get("KCLT")
+    assert clt.freq("APP") and clt.freq("DEP")

@@ -49,6 +49,19 @@ say to reply (e.g. "readback correct" after an IFR clearance) or you have a new 
 ("I say again..."), still in character.
 - A transmission that is not a readback (a request, a report, a check-in) gets readback="none".
 
+EMERGENCIES (when FACTS.emergency is set)
+- He has declared an emergency. Every controller already knows: it was coordinated, never say you didn't copy it.
+- Acknowledge and give priority. Ask "say souls on board and fuel remaining" ONLY if FACTS.emergency.souls_fuel_asked \
+is false; once asked, never ask again (if he didn't answer, move on).
+- No routine instructions at all: no climbs to cruise, no handoffs to the next en-route sector.
+- Help him land: offer the closest suitable field from FACTS.nearest_airports (or back to the departure airport if he \
+just departed) with a heading, an altitude, and the runway. As soon as he agrees on (or asks for) an airport, put its \
+ICAO code in updates.divert_to. After that, FACTS.next_facility is that airport's approach/tower: hand him off to it \
+when he's close, or clear him to land if you ARE that tower.
+- If he says he's landing off-airport or in water, give him the surface wind and say emergency equipment is \
+responding; when he reports down safely, say help is on the way and set flight_complete=true.
+- Calm, short, helpful transmissions. Don't repeat the same question twice.
+
 OTHER
 - Unintelligible or empty: "[callsign], say again." Pilot didn't give a callsign on initial call: ask "Aircraft calling \
 {facility}, say again callsign."
@@ -83,8 +96,10 @@ DUTIES — Clearance Delivery:
 1. The pilot calls for his IFR clearance and should give callsign, aircraft type, destination, and the ATIS letter. \
 Put callsign (airline style "United 123" or "N123AB"), aircraft_type (ICAO designator, e.g. A320, B738, C172), \
 destination (ICAO code if you know it, else the name he said), atis_letter, and any requested_altitude in updates.
-2. If callsign, type or destination is missing, ask only for what's missing ("United 123, say aircraft type and \
-destination."). The ATIS letter is optional for you; the system handles it.
+2. If callsign, type or destination is missing, ask only for what's missing ("United 123, say aircraft type."). \
+Check RECENT RADIO TRAFFIC and FACTS first: never ask for something he already said. NEVER ask for the ATIS letter: \
+the system tells him the current ATIS with the clearance.
+   If he changes his destination before the clearance is issued, that's fine: use the new one.
 3. Once callsign, type and destination are known (in FACTS or in your updates), set action="issue_clearance" and leave \
 say empty. The system reads the clearance.
 4. When he reads back the clearance: if correct, say "[callsign], readback correct. Contact [next facility] [frequency] \
@@ -190,6 +205,8 @@ def facts(fs: FlightState, extra: dict) -> dict:
         "climb_him_to": extra.get("climb_target"),
         "pending_readback": fs.pending_readback,
         "number_check": extra.get("number_check"),
+        "emergency": fs.emergency,
+        "nearest_airports": extra.get("nearest_airports"),
         "readback_failures": fs.readback_failures,
         "handoff_already_issued": fs.handoff_pending,
         "first_call_to_you": fs.exchanges <= 1 and not any(t.who == "atc" and t.facility == fac.id for t in fs.history),
@@ -241,9 +258,10 @@ SCHEMA = {
                 "assigned_altitude": {"type": ["integer", "null"]},
                 "assigned_heading": {"type": ["integer", "null"]},
                 "taxi_route": {"type": ["string", "null"]},
+                "divert_to": {"type": ["string", "null"]},
             },
             "required": ["callsign", "aircraft_type", "destination", "atis_letter", "requested_altitude", "parking",
-                         "assigned_altitude", "assigned_heading", "taxi_route"],
+                         "assigned_altitude", "assigned_heading", "taxi_route", "divert_to"],
         },
     },
     "required": ["action", "readback", "expects_reply", "handoff", "flight_complete", "say", "readback_items", "updates"],

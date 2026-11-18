@@ -14,12 +14,13 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
 from .brain import Brain
-from .data.airports import Airport, AirportDB
+from .data.airports import Airport, AirportDB, nm_between
 from .data.weather import Weather, get_weather, prefetch
 from .flight import Facility, FlightState, build_plan
 from .prompts import build_messages, duty_key
 from .readback import check as readback_check
 from .speech import spoken
+from .speech.tts import voice_for_slot
 
 log = logging.getLogger(__name__)
 
@@ -63,6 +64,7 @@ class Controller:
         self.fs = fs
         self.db = db
         self.brain = brain or Brain()
+        self._number_check: dict | None = None
 
     # ------------------------------------------------------------ context
 
@@ -99,6 +101,11 @@ class Controller:
         fs = self.fs
         if fs.complete or fs.handoff_pending:
             return None
+        if fs.emergency and not (fs.emergency.get("divert_to") and fs.facility.airport == fs.emergency.get("divert_to")):
+            # during an emergency nothing routine happens on a timer; only check he's still there
+            if fs.expects_reply and fs.no_response_count < 2:
+                return "no_response", fs.last_activity + NO_RESPONSE_AFTER_S
+            return None
         if fs.expects_reply and fs.no_response_count < 2:
             return "no_response", fs.last_activity + NO_RESPONSE_AFTER_S
         key = duty_key(fs.facility)
@@ -113,7 +120,7 @@ class Controller:
     def climb_target(self) -> int | None:
         """Altitude this facility should be climbing him to, if any."""
         fs = self.fs
-        if not fs.planned or not fs.cruise_altitude:
+        if not fs.planned or not fs.cruise_altitude or fs.emergency:
             return None
         cur = fs.assigned.get("altitude") or fs.initial_altitude or 0
         fac, nxt = fs.facility, fs.next_facility
@@ -166,7 +173,7 @@ class Controller:
         fs = self.fs
         self.touch()
         fs.no_response_count = 0
-        text = (text or "").strip()
+        text = clean_transcript(text)
         low = text.lower()
 
         if not text:
@@ -178,11 +185,16 @@ class Controller:
         nxt = fs.next_facility
         if nxt and (fs.handoff_pending or fs.clearance_issued):
             mentions_freq = _digits_in(nxt.freq) in _digits_in(text)
-            opening = " ".join(low.replace(",", " ").split()[:5])
-            addressed_next = nxt.keyword in opening and fs.facility.keyword not in opening
-            if (fs.handoff_pending and nxt.keyword in low and not mentions_freq) or (addressed_next and not mentions_freq):
+            if _addresses(low, nxt) and not mentions_freq and (fs.handoff_pending or not _addresses(low, fs.facility)):
                 log.info("pilot checked in with %s", nxt.name)
                 fs.advance()
+
+        if EMERGENCY_RE.search(low) and not fs.emergency:
+            fs.emergency = {"declared_to": fs.facility.name, "what_he_said": text, "souls_fuel_asked": False,
+                            "divert_to": None}
+            log.info("EMERGENCY declared: %s", text)
+        elif fs.emergency and re.search(r"\bcancel(ling)? (the )?emergency\b", low):
+            fs.emergency = None
 
         # trivial calls skip the model
         words = len(low.split())
@@ -205,10 +217,12 @@ class Controller:
                 if guess:
                     prefetch(guess)
         number_check = None
-        if fs.last_atc_text and (fs.expects_reply or fs.handoff_pending or fs.pending_readback):
-            req, missing = readback_check(fs.last_atc_text, text)
+        ref = fs.readback_ref or fs.last_atc_text
+        if ref and (fs.expects_reply or fs.handoff_pending or fs.pending_readback):
+            req, missing = readback_check(ref, text)
             if req:
                 number_check = {"required_numbers": req, "missing_or_wrong": missing}
+        self._number_check = number_check
         fs.exchanges += 1
         fs.add_turn("pilot", text)
         await self._turn(f"PILOT: {text}", speak, pilot=True, number_check=number_check)
@@ -234,6 +248,8 @@ class Controller:
         extra = await self._extra()
         extra["number_check"] = number_check
         extra["climb_target"] = self.climb_target()
+        if fs.emergency:
+            extra["nearest_airports"] = self.nearest_suitable()
         messages = build_messages(fs, extra, event_text)
         state = {"mode": "speak", "spoken": [], "handoff": False}
 
@@ -248,20 +264,29 @@ class Controller:
         result = await self.brain.respond(messages, on_decision, on_sentence)
         rb = result.get("readback", "none")
         if pilot and state["mode"] == "silent" and not state.get("advanced") and (
-                rb == "incorrect" or (rb == "none" and not _is_ack(event_text))):
+                rb == "incorrect" or state.get("recheck") or (rb == "none" and not _is_ack(event_text))):
             # a wrong readback always gets corrected; a request or check-in always gets an answer
-            log.info("model went silent (readback=%s); asking again", rb)
+            log.info("model went silent (readback=%s, recheck=%s); asking again", rb, state.get("recheck"))
+            missing = state.get("recheck")
             state = {"mode": "speak", "spoken": [], "handoff": False}
-            why = ("The readback was wrong: correct it now." if rb == "incorrect"
-                   else "This transmission is not a readback; it needs an answer from you.")
+            if missing:
+                why = (f"The machine number check shows these were missing or wrong in his readback: {missing}. "
+                       "His readback is NOT correct (\"copy\"/\"roger\" is not a readback): readback=\"incorrect\"; "
+                       "tell him what to read back.")
+            elif rb == "incorrect":
+                why = "The readback was wrong: correct it now."
+            else:
+                why = "This transmission is not a readback; it needs an answer from you."
             messages[-1]["content"] += f"\n\n{why} action must be \"speak\"."
             if rb == "incorrect":
                 fs.readback_failures = max(0, fs.readback_failures - 1)  # don't count it twice
+            self._number_check = None  # the retry is told explicitly
             result = await self.brain.respond(messages, on_decision, on_sentence)
         items = result.get("readback_items") or []
         if items and state["mode"] == "speak" and not state.get("handoff"):
             fs.pending_readback = items
         self._apply_updates(result.get("updates") or {})
+        await self._maybe_divert(result.get("updates") or {})
 
         if state["mode"] == "clearance":
             text = await self._clearance(result.get("updates") or {})
@@ -291,6 +316,10 @@ class Controller:
         if state["mode"] in ("speak", "clearance"):
             full = " ".join(state["spoken"])
             track_assignments(fs, full)
+            if items or state.get("handoff") or state["mode"] == "clearance":
+                fs.readback_ref = full
+            if fs.emergency and re.search(r"souls on board|fuel remaining", full, re.I):
+                fs.emergency["souls_fuel_asked"] = True
             nf = fs.next_facility
             if (nf and not fs.handoff_pending and fs.clearance_issued and state["mode"] == "speak"
                     and _digits_in(nf.freq) in _digits_in(full) and nf.keyword in full.lower()):
@@ -306,13 +335,19 @@ class Controller:
         fac = fs.facility
         action = d.get("action", "speak")
         readback = d.get("readback", "none") if pilot else "none"
+        nc = getattr(self, "_number_check", None)
+        if pilot and readback == "correct" and nc and nc.get("missing_or_wrong"):
+            # the model accepted a readback with numbers missing ("copy that"): ask it again
+            state["mode"] = "silent"
+            state["recheck"] = nc["missing_or_wrong"]
+            return
         if readback == "incorrect":
             fs.readback_failures += 1
         elif readback == "correct":
             fs.readback_failures = 0
             fs.pending_readback = []
 
-        if d.get("flight_complete") and fs.next_facility is None:
+        if d.get("flight_complete") and (fs.next_facility is None or fs.emergency):
             fs.complete = True
 
         # a correct (or unremarkable) readback of the handoff frequency: switch silently
@@ -325,13 +360,15 @@ class Controller:
 
         nxt = fs.next_facility
         cs = fs.callsign or ""
+        routine_ok = not fs.emergency or bool(fs.emergency.get("divert_to"))
         # Clearance Delivery's answer to a good readback is formulaic: code says it
-        if (fac.kind == "CLD" and fs.clearance_issued and pilot and readback == "correct"
+        if (fac.kind == "CLD" and fs.clearance_issued and pilot and readback == "correct" and routine_ok
                 and not fs.handoff_pending and nxt):
             self._template(state, f"{cs}, readback correct. Contact {nxt.name} {nxt.freq} when ready to taxi.")
             return
         # model flagged a handoff but forgot to say it
-        if d.get("handoff") and action == "silent" and nxt and not fs.handoff_pending and readback != "incorrect":
+        if (d.get("handoff") and action == "silent" and nxt and not fs.handoff_pending and readback != "incorrect"
+                and routine_ok):
             self._template(state, f"{cs}, contact {nxt.name} {nxt.freq}.")
             return
 
@@ -347,7 +384,8 @@ class Controller:
             return
 
         state["mode"] = "speak"
-        handoff = bool(d.get("handoff")) and fs.next_facility is not None and readback != "incorrect"
+        handoff = (bool(d.get("handoff")) and fs.next_facility is not None and readback != "incorrect"
+                   and routine_ok)
         if fac.kind == "CLD" and not fs.clearance_issued:
             handoff = False
         state["handoff"] = handoff
@@ -355,6 +393,76 @@ class Controller:
             fs.handoff_pending = True
             fs.pending_readback = [f"frequency {fs.next_facility.freq}"]
         fs.expects_reply = bool(d.get("expects_reply")) and not handoff
+
+    def approx_position(self) -> tuple[float, float]:
+        """Rough position from where he is in the facility sequence (no sim, so it's an estimate)."""
+        fs = self.fs
+        dep, dest = self.dep, self.dest
+        if not dest or fs.facility.phase == "dep":
+            return dep.lat, dep.lon
+        if fs.facility.phase == "arr":
+            return dest.lat, dest.lon
+        centers = [i for i, f in enumerate(fs.facilities) if f.kind == "CTR"]
+        frac = (centers.index(fs.idx) + 0.5) / len(centers) if fs.idx in centers else 0.5
+        from .data.artcc import _interp
+
+        return _interp(dep.lat, dep.lon, dest.lat, dest.lon, frac)
+
+    def nearest_suitable(self, n: int = 4) -> list[dict]:
+        lat, lon = self.approx_position()
+        out = []
+        for ap in self.db.by_ident.values():
+            if ap.kind not in ("large_airport", "medium_airport") or not ap.runways:
+                continue
+            if abs(ap.lat - lat) > 3 or abs(ap.lon - lon) > 4:
+                continue
+            longest = max(ap.runways, key=lambda r: r.length_ft)
+            if longest.length_ft < 6000:
+                continue
+            d = nm_between(lat, lon, ap.lat, ap.lon)
+            out.append((d, ap, longest))
+        out.sort(key=lambda x: x[0])
+        return [{"icao": ap.ident, "name": ap.spoken_name, "distance_nm": round(d), "longest_runway": r.ident,
+                 "runway_length_ft": r.length_ft, "towered": ap.towered} for d, ap, r in out[:n]]
+
+    async def _maybe_divert(self, upd: dict) -> None:
+        """He agreed on an airport to divert to: re-plan the rest of the flight to land there."""
+        fs = self.fs
+        want = upd.get("divert_to")
+        if not want or not fs.emergency or fs.emergency.get("divert_to"):
+            return
+        here = self.approx_position()
+        ap = self.db.search(want, near=here)
+        if not ap:
+            return
+        wx = await get_weather(ap)
+        from .data.weather import active_runway, approach_for
+        from .flight import _airport_facility, _radar_facility
+
+        rwy = active_runway(ap, wx, "arr")
+        fs.destination = ap.ident
+        fs.arr_runway = rwy.ident if rwy else None
+        fs.arr_approach = approach_for(ap, rwy, wx) if rwy else None
+        cur = fs.facility
+        chain: list[Facility] = []
+        if cur.airport == ap.ident and cur.kind == "TWR":
+            cur.phase = "arr"  # e.g. returning to the field he just left: same tower lands him
+        else:
+            app = _radar_facility(self.db, ap, "APP", "arr")
+            if app and not (cur.kind in ("APP", "DEP") and cur.airport == ap.ident):
+                chain.append(app)
+            twr = _airport_facility(ap, "TWR", "arr")
+            if twr:
+                chain.append(twr)
+        gnd = _airport_facility(ap, "GND", "arr")
+        if gnd:
+            chain.append(gnd)
+        for i, f in enumerate(chain):
+            f.voice = voice_for_slot(fs.idx + 1 + i, fs.voice_offset + 7).to_dict()
+        fs.facilities = fs.facilities[: fs.idx + 1] + chain
+        fs.handoff_pending = False
+        fs.emergency["divert_to"] = ap.ident
+        log.info("diverting to %s; next: %s", ap.ident, [f.name for f in chain])
 
     def _template(self, state: dict, text: str) -> None:
         fs = self.fs
@@ -426,6 +534,27 @@ class Controller:
         self.touch()
 
 
+EMERGENCY_RE = re.compile(r"\b(may ?day|pan[\s-]?pan|declar\w* (an )?emergency|emergency landing|squawk\w* 7700|"
+                          r"engine failure|lost (both|an|one|the) engines?|fire on board|smoke in the cockpit)\b")
+_NOT_ADDRESS = {"ifr", "vfr", "for", "ready", "the", "your", "to", "contact", "with", "over", "switching", "going"}
+
+
+def _addresses(low: str, fac: Facility) -> bool:
+    """Does this transmission open by calling `fac`? ('Newark Tower, ...', 'Departure, Delta 556 ...')"""
+    words = re.sub(r"[^a-z0-9 ]", " ", low).split()[:4]
+    if fac.keyword not in words:
+        return False
+    i = words.index(fac.keyword)
+    return i == 0 or words[i - 1] not in _NOT_ADDRESS
+
+
+def clean_transcript(text: str | None) -> str:
+    """Speech-recognition quirks: '1549er' / '1549 er' (from 'niner') -> '1549'."""
+    t = (text or "").strip()
+    t = re.sub(r"(\d)\s?(?:er|ner)\b", r"\1", t)
+    return t
+
+
 def _is_ack(event_text: str) -> bool:
     """'roger', 'wilco, United 123', 'copy that' and the like need no answer."""
     t = event_text.lower().removeprefix("pilot:").strip()
@@ -444,6 +573,7 @@ def normalize_callsign(cs: str) -> str:
     if low and low[0] == "november":
         tail = "".join(num.get(w, nato_rev.get(w, w.upper())) for w in low[1:])
         return "N" + re.sub(r"[^0-9A-Z]", "", tail)
+    s = clean_transcript(s)
     m = re.fullmatch(r"N-?(\d[0-9A-Z]{0,5})", s.upper().replace(" ", ""))
     if m:
         return "N" + m.group(1)
@@ -466,6 +596,7 @@ def normalize_callsign(cs: str) -> str:
             break
         else:
             name_words.append(w[:1].upper() + w[1:])
+    tail = re.sub(r"9ER$", "9", tail)
     name = " ".join(name_words)
     if name.lower() == "jetblue":
         name = "JetBlue"
