@@ -7,3 +7,4 @@ voices/
 data/*.csv
 data/*.db
 logs/
+data/recordings/
