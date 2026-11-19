@@ -63,9 +63,27 @@ def _fl(alt: int) -> str:
     return f"FL{alt // 100}" if alt >= 18000 else str(alt)
 
 
-def exchange(fs: FlightState, rng: random.Random | None = None, pool: list[str] | None = None) -> list[Line]:
-    """One realistic exchange between the current controller and another aircraft."""
+def _his_runway_state(fs: FlightState) -> str:
+    """Where he is in the tower's sequence: 'waiting', 'lineup', 'cleared' (takeoff), 'landing' (cleared to land)."""
+    fid = fs.facility.id
+    said = [t.text.lower() for t in fs.history if t.who == "atc" and t.facility == fid]
+    if any("cleared to land" in t for t in said):
+        return "landing"
+    if any("cleared for takeoff" in t for t in said):
+        return "cleared"
+    if any("line up and wait" in t for t in said):
+        return "lineup"
+    return "waiting"
+
+
+def exchange(fs: FlightState, rng: random.Random | None = None, pool: list[str] | None = None,
+             seq: dict | None = None) -> list[Line]:
+    """One realistic exchange between the current controller and another aircraft.
+
+    `seq` persists across a call: which other aircraft are rolling, so a takeoff clearance only goes
+    to a plane that just called ready, never while another is rolling or he's on the runway himself."""
     rng = rng or random.Random()
+    seq = seq if seq is not None else {}
     fac = fs.facility
     cs = _callsign(rng, fs.callsign, pool)
     pv = rng.choice(PILOT_VOICES)
@@ -111,21 +129,43 @@ def exchange(fs: FlightState, rng: random.Random | None = None, pool: list[str] 
                 [atc(f"{cs}, hold short of taxiway {tw1}."), pilot(f"Hold short {tw1}, {cs}.")],
             ]
     elif k == "TWR":
+        state = _his_runway_state(fs)
+        departed = seq.setdefault(f"{fac.id}:departed", [])  # others cleared for takeoff, not yet handed off
         if fac.phase == "arr":
             mi = rng.choice([5, 6, 8, 10])
-            options += [
-                [pilot(f"{name}, {cs}, {mi} mile final runway {rwy}."), atc(f"{cs}, {name}, runway {rwy}, cleared to land.")],
-                [atc(f"{cs}, turn right next taxiway, contact Ground."), pilot(f"Right next, Ground, {cs}.")],
-                [atc(f"{cs}, runway {rwy}, cleared to land, number two, follow the Embraer on 3 mile final."),
-                 pilot(f"Cleared to land {rwy}, number two, {cs}.")],
-            ]
+            if state == "landing":
+                # he's cleared to land: others are sequenced behind him, never cleared onto his runway
+                options += [
+                    [pilot(f"{name}, {cs}, {mi} mile final runway {rwy}."),
+                     atc(f"{cs}, {name}, runway {rwy}, continue, number two, traffic on short final.")],
+                    [pilot(f"{name}, {cs}, {mi} mile final runway {rwy}."),
+                     atc(f"{cs}, {name}, number two, follow the Boeing on 3 mile final, report 3 mile final.")],
+                ]
+            else:
+                options += [
+                    [pilot(f"{name}, {cs}, {mi} mile final runway {rwy}."), atc(f"{cs}, {name}, runway {rwy}, cleared to land.")],
+                    [atc(f"{cs}, turn right next taxiway, contact Ground."), pilot(f"Right next, Ground, {cs}.")],
+                ]
         else:
-            options += [
-                [atc(f"{cs}, runway {rwy}, line up and wait."), pilot(f"Line up and wait {rwy}, {cs}.")],
-                [atc(f"{cs}, runway {rwy}, cleared for takeoff."), pilot(f"Cleared for takeoff {rwy}, {cs}.")],
-                [atc(f"{cs}, contact Departure. Good day."), pilot(f"Departure, {cs}, good day.")],
-                [pilot(f"{name}, {cs}, holding short {rwy}, ready."), atc(f"{cs}, {name}, hold short runway {rwy}, traffic landing.")],
-            ]
+            on_runway = state in ("lineup", "cleared")
+            # someone already cleared and rolling: hand them to departure (frees the runway)
+            if departed:
+                d = departed[0]
+                options += [[Line("atc", f"{d}, contact Departure. Good day.", d),
+                             Line("pilot", f"Departure, {d}, good day.", d, pv)]]
+            if not on_runway and not departed:
+                # a departure ahead of him: it called ready, gets cleared, rolls. Never left sitting on the
+                # runway (his own controller doesn't know about chatter planes, so none may block him)
+                options += [[pilot(f"{name}, {cs}, holding short {rwy}, ready."),
+                             atc(f"{cs}, {name}, runway {rwy}, cleared for takeoff."),
+                             pilot(f"Cleared for takeoff {rwy}, {cs}.")]]
+            if on_runway:
+                # he's on the runway or rolling: others hold short (at most line up behind once he's airborne)
+                options += [[pilot(f"{name}, {cs}, holding short {rwy}, ready."),
+                             atc(f"{cs}, {name}, hold short runway {rwy}, departure ahead.")]]
+            if not options:
+                options += [[pilot(f"{name}, {cs}, holding short {rwy}, ready."),
+                             atc(f"{cs}, {name}, hold short runway {rwy}.")]]
     elif k == "DEP":
         a1, a2 = _alt(rng, 2000, 4000), _alt(rng, 8000, 14000)
         options += [
@@ -159,4 +199,22 @@ def exchange(fs: FlightState, rng: random.Random | None = None, pool: list[str] 
         ]
     if not options:
         return []
-    return rng.choice(options)
+    chosen = rng.choice(options)
+    _advance_sequence(fs, seq, chosen)
+    return chosen
+
+
+def _advance_sequence(fs: FlightState, seq: dict, lines: list[Line]) -> None:
+    """Remember what the tower just told other aircraft, so the next exchange follows on from it."""
+    fac = fs.facility
+    if fac.kind != "TWR":
+        return
+    departed = seq.setdefault(f"{fac.id}:departed", [])
+    for ln in lines:
+        if ln.who != "atc":
+            continue
+        t = ln.text.lower()
+        if "cleared for takeoff" in t:
+            departed.append(ln.callsign)
+        elif "contact departure" in t and ln.callsign in departed:
+            departed.remove(ln.callsign)

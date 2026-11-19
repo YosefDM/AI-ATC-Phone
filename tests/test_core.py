@@ -135,3 +135,35 @@ def test_clearance_departure_frequency_is_required():
            "expect FL380 10 minutes after departure. Departure frequency 119.2, squawk 4441.")
     assert check(clr, "Cleared to Miami as filed, climb and maintain 2,500, squawk 4441, United 118")[1] == ["119.2"]
     assert check("United 118, contact New York Departure 119.2.", "Departure, United 118, good day")[1] == []
+
+
+def test_tower_chatter_follows_runway_sequence():
+    import random
+
+    from atc.chatter import exchange
+    from atc.data.airports import get_db
+    from atc.data.weather import _standard
+    from atc.flight import build_plan, start_flight
+
+    db = get_db()
+    dep = db.get("KEWR")
+    fs = start_flight("+1", dep)
+    fs.callsign, fs.aircraft_type = "United 118", "B777"
+    build_plan(fs, db, dep, db.get("KMIA"), _standard("x"), _standard("y"))
+    fs.idx = next(i for i, f in enumerate(fs.facilities) if f.kind == "TWR")
+    rng, seq = random.Random(3), {}
+    rolling = set()
+    for step in range(300):
+        if step == 150:  # he gets cleared for takeoff halfway through
+            fs.add_turn("atc", "United 118, runway 22R, cleared for takeoff.")
+        for ln in exchange(fs, rng, seq=seq):
+            t = ln.text.lower()
+            if ln.who != "atc":
+                continue
+            assert "line up and wait" not in t, "a chatter plane left sitting on his runway"
+            if "cleared for takeoff" in t:
+                assert step < 150, "another plane cleared for takeoff while he was on the runway"
+                assert not rolling, "two planes rolling at once"
+                rolling.add(ln.callsign)
+            if "contact departure" in t:
+                rolling.discard(ln.callsign)

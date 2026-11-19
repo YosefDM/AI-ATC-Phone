@@ -100,6 +100,7 @@ class CallSession:
         self.chatter_level = settings.chatter_default if settings.chatter_default in CHATTER_CYCLE else "auto"
         self.auto_level = "normal"  # what live traffic says, when chatter_level is "auto"
         self.callsign_pool: list[str] = []
+        self.chatter_seq: dict = {}  # other aircraft's place in the tower sequence (see chatter.exchange)
         self.next_traffic_check = 0.0
         self.next_chatter_at = time.time() + random.uniform(8.0, 15.0)
         self.last_atc_to_him = 0.0
@@ -438,9 +439,9 @@ class CallSession:
         return True
 
     async def _play_chatter(self) -> None:
-        lines = chatter.exchange(self.fs, pool=self.callsign_pool)
+        lines = chatter.exchange(self.fs, pool=self.callsign_pool, seq=self.chatter_seq)
         if self.effective_chatter == "busy" and random.random() < 0.35:
-            lines = lines + chatter.exchange(self.fs, pool=self.callsign_pool)  # back-to-back, like a busy frequency
+            lines = lines + chatter.exchange(self.fs, pool=self.callsign_pool, seq=self.chatter_seq)  # back-to-back, like a busy frequency
         self._schedule_chatter()
         if not lines:
             return
