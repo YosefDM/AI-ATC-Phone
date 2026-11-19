@@ -345,6 +345,12 @@ class Controller:
             state["mode"] = "silent"
             state["recheck"] = nc["missing_or_wrong"]
             return
+        if (pilot and fs.handoff_pending and readback == "incorrect" and nc is not None
+                and not nc.get("missing_or_wrong")):
+            # a handoff readback the number check accepts (a garbled frequency counts as an acknowledgment)
+            # never gets a "negative": switch him over like a real controller would
+            log.info("overruling 'incorrect' on a handoff readback the number check accepts")
+            readback, action = "correct", "silent"
         if readback == "incorrect":
             fs.readback_failures += 1
         elif readback == "correct":
