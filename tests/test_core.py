@@ -107,3 +107,12 @@ def test_transcript_number_cleanup():
 
     assert clean_transcript("Delta 556 with you at 130,000.") == "Delta 556 with you at 13,000."
     assert clean_transcript("Maintain flight level 300-646.") == "Maintain flight level 300 646."
+
+
+def test_readback_unable_and_callsign_not_frequency():
+    from atc.readback import check
+
+    assert check("United 118, unable FL360. Maintain FL380.", "Maintain flight level 380, United 118")[1] == []
+    atc = "United 118, readback correct. Contact Newark Ground 121.8 when ready to taxi."
+    assert check(atc, "Ground, United 118") == (["121.8"], [])
+    assert check(atc, "121.9, United 118")[1] == ["121.8"]

@@ -616,6 +616,10 @@ def track_assignments(fs: FlightState, atc_text: str) -> None:
         pass
     if m:
         fs.assigned["altitude"] = int(m.group(2)) * 100 if m.group(2) else int(m.group(3).replace(",", ""))
+        # center approving a different cruise level: that's his cruise now (no climbing him back)
+        if fs.facility.kind == "CTR" and fs.cruise_altitude and fs.assigned["altitude"] >= 18000 \
+                and "descend" not in m.group(0).lower():
+            fs.cruise_altitude = fs.assigned["altitude"]
     h = re.search(r"\bheading (\d{3})\b", atc_text, re.I)
     if h:
         fs.assigned["heading"] = int(h.group(1))

@@ -77,6 +77,8 @@ def required_items(atc_text: str) -> list[str]:
     t = re.sub(r"\baltimeter\s+\d+\.?\d*", " ", t, flags=re.I)
     t = re.sub(r"\bwind\s+\d{3}\s+at\s+\d+(\s+gusts\s+\d+)?", " ", t, flags=re.I)
     t = re.sub(r"\b\d+\s+(miles?|o'clock|minutes?)\b", " ", t, flags=re.I)
+    # a refused request isn't an instruction: "unable FL360, maintain FL380" only requires 380
+    t = re.sub(r"\bunable\s+(?:FL\s?\d+|flight level\s+\d+|\d[\d,]*)", " ", t, flags=re.I)
     items: list[str] = []
     for m in re.finditer(r"\b(1[1-3]\d\.\d{1,3})\b", t):
         items.append(m.group(1).rstrip("0").rstrip(".") if "." in m.group(1) else m.group(1))
@@ -117,7 +119,9 @@ def check(atc_text: str, pilot_text: str) -> tuple[list[str], list[str]]:
             # frequency: real pilots often just acknowledge a frequency change with their callsign, so
             # leaving it out is fine; reading back a DIFFERENT frequency is still wrong
             d = item.replace(".", "")
-            said_freqs = re.findall(r"\b1[1-3]\d\.?\d{0,3}\b", p)
+            # only something that looks like a frequency counts (has a decimal: "121.8"), so his
+            # callsign ("United 118") is never mistaken for one
+            said_freqs = re.findall(r"\b1[1-3]\d\.\d{1,3}\b", p)
             ok = d in joined or item in p or not said_freqs
         elif len(item) >= 4 and int(item) % 100 == 0 and int(item) >= 1000:  # altitude
             fl = str(int(item) // 100)
