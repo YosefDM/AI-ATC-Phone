@@ -318,7 +318,9 @@ class Controller:
         if state["mode"] in ("speak", "clearance"):
             full = " ".join(state["spoken"])
             track_assignments(fs, full)
-            if items or state.get("handoff") or state["mode"] == "clearance":
+            if items or state.get("handoff") or state["mode"] == "clearance" or (pilot and rb == "incorrect"):
+                # after a correction ("negative, squawk 4441") he only needs to read back the corrected item,
+                # so his next readback is checked against the correction, not the whole original clearance
                 fs.readback_ref = full
             if fs.emergency and re.search(r"souls on board|fuel remaining", full, re.I):
                 fs.emergency["souls_fuel_asked"] = True
