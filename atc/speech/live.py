@@ -80,7 +80,7 @@ class _Base:
                 if self._handle(json.loads(raw)):
                     break
         except Exception as e:  # noqa: BLE001
-            if not self._done.is_set():
+            if not self._done.is_set() and not getattr(self, "_closing", False):
                 log.warning("%s live STT read failed: %s", type(self).__name__, e)
                 self.failed = True
         finally:
@@ -93,12 +93,13 @@ class _Base:
         except asyncio.TimeoutError:
             log.warning("%s live STT timed out", type(self).__name__)
             self.failed = True
-        await self.close()
+        asyncio.create_task(self.close())  # close in the background: the reply shouldn't wait for it
         if self.failed and not self.text_parts:
             return None
         return " ".join(p for p in self.text_parts if p).strip()
 
     async def close(self) -> None:
+        self._closing = True
         if self._runner and not self._runner.done():
             self._queue.put_nowait(None)
         if self.ws is not None:
@@ -134,7 +135,15 @@ class AssemblyAILive(_Base):
         await self.ws.send(json.dumps({"type": "ForceEndpoint"}))
 
     async def _goodbye(self) -> None:
+        # wait for the server to confirm, so the next transmission's session isn't refused as "concurrent"
         await self.ws.send(json.dumps({"type": "Terminate"}))
+        try:
+            async with asyncio.timeout(3):
+                async for raw in self.ws:
+                    if json.loads(raw).get("type") == "Termination":
+                        break
+        except Exception:  # noqa: BLE001
+            pass
 
     def _handle(self, m: dict) -> bool:
         if m.get("type") == "Error" or "error" in m:

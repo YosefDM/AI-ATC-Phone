@@ -100,3 +100,10 @@ def test_combined_approach_departure_frequency():
 
     clt = get_db().get("KCLT")
     assert clt.freq("APP") and clt.freq("DEP")
+
+
+def test_transcript_number_cleanup():
+    from atc.controller import clean_transcript
+
+    assert clean_transcript("Delta 556 with you at 130,000.") == "Delta 556 with you at 13,000."
+    assert clean_transcript("Maintain flight level 300-646.") == "Maintain flight level 300 646."

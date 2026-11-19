@@ -554,6 +554,10 @@ def clean_transcript(text: str | None) -> str:
     """Speech-recognition quirks: '1549er' / '1549 er' (from 'niner') -> '1549'."""
     t = (text or "").strip()
     t = re.sub(r"(\d)\s?(?:er|ner)\b", r"\1", t)
+    # "one three thousand" sometimes comes back as "130,000": no aircraft is that high
+    t = re.sub(r"\b([1-9])([0-9])0,?000\b", lambda m: f"{m.group(1)}{m.group(2)},000", t)
+    # "flight level 300-646": a hyphen glued two separate numbers together
+    t = re.sub(r"(\d)-(\d)", r"\1 \2", t)
     return t
 
 
