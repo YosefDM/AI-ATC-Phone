@@ -114,8 +114,11 @@ def check(atc_text: str, pilot_text: str) -> tuple[list[str], list[str]]:
             num, side = parts[1], (parts[2] if len(parts) > 2 else None)
             ok = re.search(rf"\b{num}\b" + (rf"\s*{side}" if side else ""), p) is not None
         elif "." in item:
+            # frequency: real pilots often just acknowledge a frequency change with their callsign, so
+            # leaving it out is fine; reading back a DIFFERENT frequency is still wrong
             d = item.replace(".", "")
-            ok = d in joined or item in p
+            said_freqs = re.findall(r"\b1[1-3]\d\.?\d{0,3}\b", p)
+            ok = d in joined or item in p or not said_freqs
         elif len(item) >= 4 and int(item) % 100 == 0 and int(item) >= 1000:  # altitude
             fl = str(int(item) // 100)
             ok = item in numbers or (int(item) >= 18000 and fl in numbers)

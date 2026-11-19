@@ -5,7 +5,7 @@ Keypad (defaults):
        If he forgets the second press, ~2 s of silence after speech ends it.
     9  listen to the ATIS (any key stops it)
     0  help: which frequency he's on and how the keys work
-    7  background radio chatter: off / light / busy
+    7  background radio chatter: auto (as busy as the real sky right now) / off / light / normal / busy
     *  twice: start a new flight
     #  phone list (owners only): add or remove callers who may use the line
 The line is half-duplex like a radio: keying up while ATC is talking cuts ATC off.
@@ -38,14 +38,16 @@ from .flight import Facility, FlightState, start_flight
 from .speech import spoken
 from .speech.stt import STT
 from .speech import deepgram
-from .speech.tts import TTS, Voice, atis_voice, resolve, system_voice
+from .speech.tts import TTS, Voice, atis_voice, paced, resolve, system_voice
 from .store import Store
+from .traffic import AREA, TrafficWatch, callsigns_for, level_for
 
 log = logging.getLogger(__name__)
 calls_log = logging.getLogger("atc.transcript")
 
-# seconds of quiet between background exchanges
-CHATTER_GAPS = {"off": (0, 0), "light": (25.0, 50.0), "busy": (12.0, 24.0)}
+# seconds of quiet between background exchanges; "auto" picks one of these from live traffic
+CHATTER_GAPS = {"off": (0, 0), "sparse": (40.0, 80.0), "light": (20.0, 40.0), "normal": (10.0, 20.0), "busy": (5.0, 10.0)}
+CHATTER_CYCLE = ["auto", "off", "light", "normal", "busy"]
 # other aircraft: farther away and weaker than the controller's ground station
 OTHER_PILOT_PROFILE = radio.RadioProfile(500, 2400, 4.2, -24, 0.42, 0.004)
 
@@ -56,6 +58,7 @@ class Services:
     tts: TTS
     stt: STT
     store: Store
+    traffic: TrafficWatch | None = None
 
 
 class CallSession:
@@ -89,8 +92,11 @@ class CallSession:
         self._send_lock = asyncio.Lock()
 
         # background traffic
-        self.chatter_level = settings.chatter_default if settings.chatter_default in CHATTER_GAPS else "light"
-        self.next_chatter_at = time.time() + random.uniform(*CHATTER_GAPS.get(self.chatter_level, (20, 30)))
+        self.chatter_level = settings.chatter_default if settings.chatter_default in CHATTER_CYCLE else "auto"
+        self.auto_level = "normal"  # what live traffic says, when chatter_level is "auto"
+        self.callsign_pool: list[str] = []
+        self.next_traffic_check = 0.0
+        self.next_chatter_at = time.time() + random.uniform(8.0, 15.0)
         self.last_atc_to_him = 0.0
 
         # keypad menu for the phone list
@@ -200,10 +206,10 @@ class CallSession:
         elif digit == settings.help_key:
             await self.help()
         elif digit == settings.chatter_key:
-            order = ["off", "light", "busy"]
-            self.chatter_level = order[(order.index(self.chatter_level) + 1) % 3]
+            self.chatter_level = CHATTER_CYCLE[(CHATTER_CYCLE.index(self.chatter_level) + 1) % len(CHATTER_CYCLE)]
             self._schedule_chatter()
-            await self.system(f"Background traffic {self.chatter_level}.")
+            label = "auto, as busy as the real sky" if self.chatter_level == "auto" else self.chatter_level
+            await self.system(f"Background traffic {label}.")
         elif digit == settings.menu_key:
             await self._menu_open()
         elif digit == settings.new_flight_key:
@@ -362,13 +368,40 @@ class CallSession:
 
     # ------------------------------------------------------------ background chatter
 
+    @property
+    def effective_chatter(self) -> str:
+        return self.auto_level if self.chatter_level == "auto" else self.chatter_level
+
     def _schedule_chatter(self) -> None:
-        lo, hi = CHATTER_GAPS.get(self.chatter_level, (0, 0))
-        self.next_chatter_at = time.time() + random.uniform(lo, hi) if hi else float("inf")
+        lo, hi = CHATTER_GAPS.get(self.effective_chatter, (0, 0))
+        self.next_chatter_at = time.time() + random.uniform(lo, hi) if hi else time.time() + 30.0
+        if self.ctl:
+            self.ctl.frequency_busy = self.effective_chatter in ("normal", "busy")
+
+    async def _refresh_traffic(self) -> None:
+        """Auto mode: look at the real sky around his current controller."""
+        svc, fs = self.svc, self.fs
+        if not svc.traffic or not fs:
+            return
+        fac = fs.facility
+        ap = svc.db.get(fac.airport) if fac.airport else None
+        lat, lon = (ap.lat, ap.lon) if ap else self.ctl.approx_position()
+        snap = await svc.traffic.around(lat, lon, AREA.get(fac.kind, 0.6))
+        before = self.auto_level
+        self.auto_level = level_for(fac.kind, snap)
+        self.callsign_pool = callsigns_for(fac.kind, snap)
+        if self.auto_level != before:
+            log.info("auto traffic near %s: %d airborne / %d ground -> %s", fac.name, snap.airborne, snap.ground,
+                     self.auto_level)
+            if CHATTER_GAPS[self.auto_level][1] < CHATTER_GAPS.get(before, (0, 99))[1]:
+                self._schedule_chatter()  # got busier: don't wait out the old long gap
 
     def _chatter_ok(self, now: float, nudge) -> bool:
         fs = self.fs
-        if self.chatter_level == "off" or not deepgram.enabled() or fs is None or fs.complete:
+        if self.chatter_level == "auto" and now >= self.next_traffic_check and fs is not None:
+            self.next_traffic_check = now + 60.0
+            asyncio.create_task(self._refresh_traffic())
+        if self.effective_chatter == "off" or not deepgram.enabled() or fs is None or fs.complete:
             return False
         if now < self.next_chatter_at:
             return False
@@ -380,12 +413,14 @@ class CallSession:
         return True
 
     async def _play_chatter(self) -> None:
-        lines = chatter.exchange(self.fs)
+        lines = chatter.exchange(self.fs, pool=self.callsign_pool)
+        if self.effective_chatter == "busy" and random.random() < 0.35:
+            lines = lines + chatter.exchange(self.fs, pool=self.callsign_pool)  # back-to-back, like a busy frequency
         self._schedule_chatter()
         if not lines:
             return
         fac = self.fs.facility
-        atc_voice = resolve(self.fs.voice_for(fac)) if fac.voice else system_voice()
+        atc_voice = paced(resolve(self.fs.voice_for(fac)), fac.kind) if fac.voice else system_voice()
         atc_prof = radio.profile_for(fac.id, fac.kind)
         if self.rec:
             self.rec.event("chatter", lines=[f"{ln.who}: {ln.text}" for ln in lines])
@@ -572,7 +607,7 @@ class Outgoing:
                 return
             fac, sentence = item
             text = spoken.speak(sentence, call.fs.callsign)
-            voice = resolve(call.fs.voice_for(fac)) if fac.voice else system_voice()
+            voice = paced(resolve(call.fs.voice_for(fac)), fac.kind) if fac.voice else system_voice()
             if stream is None:
                 profile = radio.profile_for(fac.id, fac.kind)
                 stream = radio.RadioStream(profile)

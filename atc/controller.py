@@ -65,6 +65,7 @@ class Controller:
         self.db = db
         self.brain = brain or Brain()
         self._number_check: dict | None = None
+        self.frequency_busy = False  # set by the call from the chatter level; busy = terser controllers
 
     # ------------------------------------------------------------ context
 
@@ -248,6 +249,7 @@ class Controller:
         extra = await self._extra()
         extra["number_check"] = number_check
         extra["climb_target"] = self.climb_target()
+        extra["frequency_busy"] = self.frequency_busy
         if fs.emergency:
             extra["nearest_airports"] = self.nearest_suitable()
         messages = build_messages(fs, extra, event_text)

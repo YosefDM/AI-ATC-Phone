@@ -33,7 +33,12 @@ class Line:
     voice: str | None = None  # pilot voice (atc uses the facility's voice)
 
 
-def _callsign(rng: random.Random, own: str | None) -> str:
+def _callsign(rng: random.Random, own: str | None, pool: list[str] | None = None) -> str:
+    """Prefer a real aircraft flying nearby right now; otherwise make one up."""
+    own_airline = own.split()[0].lower() if own else None
+    real = [c for c in (pool or []) if c.split()[0].lower() != own_airline and c != own]
+    if real and rng.random() < 0.85:
+        return rng.choice(real)
     while True:
         if rng.random() < 0.15:
             cs = f"N{rng.randint(1, 9)}{rng.randint(10, 999)}{rng.choice(LETTERS)}{rng.choice(LETTERS)}"
@@ -58,11 +63,11 @@ def _fl(alt: int) -> str:
     return f"FL{alt // 100}" if alt >= 18000 else str(alt)
 
 
-def exchange(fs: FlightState, rng: random.Random | None = None) -> list[Line]:
+def exchange(fs: FlightState, rng: random.Random | None = None, pool: list[str] | None = None) -> list[Line]:
     """One realistic exchange between the current controller and another aircraft."""
     rng = rng or random.Random()
     fac = fs.facility
-    cs = _callsign(rng, fs.callsign)
+    cs = _callsign(rng, fs.callsign, pool)
     pv = rng.choice(PILOT_VOICES)
     rwy = (fs.arr_runway if fac.phase == "arr" else fs.dep_runway) or rng.choice(["4L", "22R", "29", "31"])
     tw = ", ".join(rng.sample(TAXIWAYS, rng.choice([1, 2, 2, 3])))

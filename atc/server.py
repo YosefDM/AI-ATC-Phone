@@ -25,6 +25,7 @@ from .data.airports import get_db
 from .speech.stt import STT
 from .speech.tts import get_tts
 from .store import Store
+from .traffic import TrafficWatch
 
 log = logging.getLogger("atc.server")
 
@@ -54,7 +55,8 @@ async def lifespan(app: FastAPI):
     db = get_db()
     tts = get_tts()
     tts.warm()
-    app.state.svc = Services(db=db, tts=tts, stt=STT(), store=Store(settings.data_dir / "flights.db"))
+    app.state.svc = Services(db=db, tts=tts, stt=STT(), store=Store(settings.data_dir / "flights.db"),
+                             traffic=TrafficWatch())
     log.info("ready (voices: %s)", "Deepgram Aura-2" if settings.deepgram_api_key else "local Piper")
     yield
     if tts._dg is not None:

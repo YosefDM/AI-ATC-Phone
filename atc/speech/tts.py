@@ -55,9 +55,29 @@ class Voice:
         return Voice(d["model"], d.get("speaker"), d.get("length_scale", 0.9), d.get("speed", 1.0))
 
 
+# Each voice's natural pace at speed 1.0 (words per minute, measured on an ATC transmission).
+VOICE_WPM = {"aura-2-orpheus-en": 213, "aura-2-asteria-en": 156, "aura-2-arcas-en": 188, "aura-2-saturn-en": 148,
+             "aura-2-callista-en": 155, "aura-2-neptune-en": 149, "aura-2-zeus-en": 237, "aura-2-thalia-en": 146,
+             "aura-2-hermes-en": 140, "aura-2-athena-en": 155, "aura-2-jupiter-en": 162, "aura-2-odysseus-en": 126,
+             "aura-2-electra-en": 131, "aura-2-orion-en": 143, "aura-2-hera-en": 150, "aura-2-mars-en": 156}
+# Real US controllers measure around 170-200+ words per minute (e.g. ~200 at JFK); ICAO's 100 is widely ignored.
+TARGET_WPM = 200.0
+# busy local/radar positions talk a little quicker than a center sector
+KIND_PACE = {"GND": 1.05, "TWR": 1.05, "DEP": 1.05, "APP": 1.05, "CLD": 1.0, "CTR": 0.95}
+
+
+def paced(v: Voice, kind: str) -> Voice:
+    """Speed this voice so the controller lands near real ATC pace for his position."""
+    if not v.is_deepgram:
+        return v
+    wpm = VOICE_WPM.get(v.model, 155)
+    speed = max(0.85, min(1.6, TARGET_WPM / wpm * KIND_PACE.get(kind, 1.0)))
+    return Voice(v.model, v.speaker, v.length_scale, round(speed, 2))
+
+
 def _dg_voice(i: int) -> Voice:
     name = DG_RING[i % len(DG_RING)]
-    return Voice(name, speed=round(1.08 + (i * 7 % 5) * 0.02, 2))  # 1.08 .. 1.16: controllers talk fast
+    return paced(Voice(name), "CLD")
 
 
 def _piper_voice(i: int) -> Voice:
