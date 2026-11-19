@@ -20,6 +20,10 @@ _SIDES = {"l": "left", "r": "right", "c": "center", "left": "left", "right": "ri
 def normalize_numbers(text: str) -> str:
     """Turn spoken numbers into digits: 'one one niner point two' -> '119.2', 'two thousand five hundred' -> '2500'."""
     t = re.sub(r"(\d),(\d{3})", r"\1\2", text.lower()).replace("-", " ")
+    # speech recognition often hears "two" as "to"/"too" inside a digit-by-digit number
+    # ("one two one point eight" -> "1 to 1.8"); a lone digit on each side means it was "two"
+    digit = r"(?:\d|zero|one|two|three|four|five|six|seven|eight|nine|niner)"
+    t = re.sub(rf"(?<![\w.])({digit})\s+t(?:o|oo)\s+(?=(?:{digit}|thousand|hundred)(?:\b|\.))", r"\1 two ", t)
     t = re.sub(r"(\d)\s*(?=thousand)", r"\1 ", t)
     tokens = re.findall(r"[a-z]+|\d+(?:\.\d+)?|\.(?=\s*\d|\s*[a-z])|[,;:!?]|\.", t)
     out: list[str] = []

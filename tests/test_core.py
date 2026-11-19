@@ -116,3 +116,13 @@ def test_readback_unable_and_callsign_not_frequency():
     atc = "United 118, readback correct. Contact Newark Ground 121.8 when ready to taxi."
     assert check(atc, "Ground, United 118") == (["121.8"], [])
     assert check(atc, "121.9, United 118")[1] == ["121.8"]
+
+
+def test_to_heard_for_two_inside_numbers():
+    from atc.readback import check, normalize_numbers
+
+    assert "121.8" in normalize_numbers("1 to 1.8, United 118")
+    assert check("United 123, climb and maintain 12000.", "climb maintain one to thousand, United 123")[1] == []
+    assert check("United 123, contact Ground 121.8.", "one to one point eight, United 123")[1] == []
+    # a real 'to' between bigger numbers is left alone
+    assert "700 to 2500" in normalize_numbers("climbing through 700 to 2500")
