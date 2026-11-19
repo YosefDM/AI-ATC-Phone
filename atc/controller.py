@@ -221,6 +221,12 @@ class Controller:
         ref = fs.readback_ref or fs.last_atc_text
         if ref and (fs.expects_reply or fs.handoff_pending or fs.pending_readback):
             req, missing = readback_check(ref, text)
+            if re.search(r"\bunable\b", ref, re.I) and fs.assigned.get("altitude"):
+                # "unable FL320, maintain FL300" when he's already at FL300: nothing new, "roger" is enough
+                cur = fs.assigned["altitude"]
+                same = {str(cur), str(cur // 100)}
+                req = [r for r in req if r not in same]
+                missing = [r for r in missing if r not in same]
             if req:
                 number_check = {"required_numbers": req, "missing_or_wrong": missing}
         self._number_check = number_check
