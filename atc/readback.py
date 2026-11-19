@@ -126,7 +126,9 @@ def check(atc_text: str, pilot_text: str) -> tuple[list[str], list[str]]:
             # only something that looks like a frequency counts (has a decimal: "121.8"), so his
             # callsign ("United 118") is never mistaken for one
             said_freqs = re.findall(r"\b1[1-3]\d\.\d{1,3}\b", p)
-            ok = d in joined or item in p or not said_freqs
+            # ...except the departure frequency inside an IFR clearance, which must be read back
+            in_clearance = re.search(r"\bcleared to\b", atc_text, re.I) is not None
+            ok = d in joined or item in p or (not said_freqs and not in_clearance)
         elif len(item) >= 4 and int(item) % 100 == 0 and int(item) >= 1000:  # altitude
             fl = str(int(item) // 100)
             ok = item in numbers or (int(item) >= 18000 and fl in numbers)

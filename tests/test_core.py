@@ -126,3 +126,12 @@ def test_to_heard_for_two_inside_numbers():
     assert check("United 123, contact Ground 121.8.", "one to one point eight, United 123")[1] == []
     # a real 'to' between bigger numbers is left alone
     assert "700 to 2500" in normalize_numbers("climbing through 700 to 2500")
+
+
+def test_clearance_departure_frequency_is_required():
+    from atc.readback import check
+
+    clr = ("United 118, cleared to Miami airport via radar vectors, then as filed. Climb and maintain 2500, "
+           "expect FL380 10 minutes after departure. Departure frequency 119.2, squawk 4441.")
+    assert check(clr, "Cleared to Miami as filed, climb and maintain 2,500, squawk 4441, United 118")[1] == ["119.2"]
+    assert check("United 118, contact New York Departure 119.2.", "Departure, United 118, good day")[1] == []
