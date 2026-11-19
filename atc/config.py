@@ -36,6 +36,14 @@ class Settings:
     deepgram_api_key: str = field(default_factory=lambda: os.getenv("DEEPGRAM_API_KEY", ""))
     deepgram_stt_model: str = field(default_factory=lambda: os.getenv("DEEPGRAM_STT_MODEL", "nova-3"))
 
+    # Live (streaming) speech recognition: assemblyai | openai | elevenlabs | deepgram
+    stt_provider: str = field(default_factory=lambda: os.getenv("STT_PROVIDER", "assemblyai"))
+    assemblyai_api_key: str = field(default_factory=lambda: os.getenv("ASSEMBLYAI_API_KEY", ""))
+    assemblyai_stt_model: str = field(default_factory=lambda: os.getenv("ASSEMBLYAI_STT_MODEL",
+                                                                        "assemblyai-stt-3-7-realtime-agent"))
+    elevenlabs_api_key: str = field(default_factory=lambda: os.getenv("ELEVENLABS_API_KEY", ""))
+    openai_live_stt_model: str = field(default_factory=lambda: os.getenv("OPENAI_LIVE_STT_MODEL", "gpt-live-transcribe"))
+
     # Twilio
     twilio_auth_token: str = field(default_factory=lambda: os.getenv("TWILIO_AUTH_TOKEN", ""))
     public_base_url: str = field(default_factory=lambda: os.getenv("PUBLIC_BASE_URL", "").rstrip("/"))

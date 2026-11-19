@@ -38,6 +38,7 @@ from .flight import Facility, FlightState, start_flight
 from .speech import spoken
 from .speech.stt import STT
 from .speech import deepgram
+from .speech import live as live_stt
 from .speech.tts import TTS, Voice, atis_voice, paced, resolve, system_voice
 from .store import Store
 from .traffic import AREA, TrafficWatch, callsigns_for, level_for
@@ -48,6 +49,8 @@ calls_log = logging.getLogger("atc.transcript")
 # seconds of quiet between background exchanges; "auto" picks one of these from live traffic
 CHATTER_GAPS = {"off": (0, 0), "sparse": (40.0, 80.0), "light": (20.0, 40.0), "normal": (10.0, 20.0), "busy": (5.0, 10.0)}
 CHATTER_CYCLE = ["auto", "off", "light", "normal", "busy"]
+TAIL_QUIET_S = 0.25  # this much quiet after the key press means his last word has ended
+TAIL_MAX_S = 0.8  # never wait longer than this after the key press
 # other aircraft: farther away and weaker than the controller's ground station
 OTHER_PILOT_PROFILE = radio.RadioProfile(500, 2400, 4.2, -24, 0.42, 0.004)
 
@@ -80,7 +83,9 @@ class CallSession:
         self.tx_started = 0.0
         self.preroll: collections.deque[np.ndarray] = collections.deque(maxlen=max(1, int(settings.preroll_s / 0.02)))
         self.detector = SpeechDetector()
-        self.live: deepgram.LiveTranscriber | None = None  # streaming STT for the current transmission
+        self.live = None  # streaming STT for the current transmission (see speech/live.py)
+        # he pressed 1 to stop while still mid-word: keep listening until the word ends (or this deadline)
+        self.tail_deadline: float | None = None
 
         # outbound playback
         self.pending_marks: set[str] = set()
@@ -170,6 +175,10 @@ class CallSession:
         self.detector.push(frame)
         elapsed = time.monotonic() - self.tx_started
         d = self.detector
+        if self.tail_deadline is not None:
+            if d.silence_run_s >= TAIL_QUIET_S or time.monotonic() >= self.tail_deadline:
+                await self._end_tx("key", squelch=False)
+            return
         if d.heard_speech and d.silence_run_s >= settings.silence_stop_s:
             await self._end_tx("silence")
         elif not d.heard_speech and elapsed > settings.no_speech_timeout_s:
@@ -190,8 +199,11 @@ class CallSession:
             await self._menu_key(digit)
             return
         if digit == settings.ptt_key:
-            if self.transmitting:
-                await self._end_tx("key")
+            if self.transmitting and self.tail_deadline is not None:
+                await self._end_tx("key", squelch=False)  # keyed again while we were catching his last word
+                await self._start_tx()
+            elif self.transmitting:
+                await self._key_release()
             else:
                 await self._start_tx()
             return
@@ -241,8 +253,8 @@ class CallSession:
         self.tx_frames = list(self.preroll)  # keep the half second before the key press
         self.preroll.clear()
         self.detector.reset()
-        if deepgram.enabled() and self.fs:
-            self.live = deepgram.LiveTranscriber(self._stt_terms())
+        if live_stt.available() and self.fs:
+            self.live = live_stt.new_transcriber(self._stt_terms())
             self.live.start()
             for f in self.tx_frames:
                 self._stream_frame(f)
@@ -250,17 +262,30 @@ class CallSession:
         if self.rec:
             self.rec.event("tx_start")
 
-    async def _end_tx(self, reason: str) -> None:
+    async def _key_release(self) -> None:
+        """He pressed 1 to stop. If he's still mid-word, keep capturing until the word ends (max TAIL_MAX_S),
+        so the end of his callsign isn't cut off; if he's already quiet, stop right away (no added delay)."""
+        await self.send_audio(radio.to_phone(radio.squelch_tail()), mark=False)
+        d = self.detector
+        if d.heard_speech and d.silence_run_s < TAIL_QUIET_S:
+            self.tail_deadline = time.monotonic() + TAIL_MAX_S
+            return
+        await self._end_tx("key", squelch=False)
+
+    async def _end_tx(self, reason: str, squelch: bool = True) -> None:
         if not self.transmitting:
             return
         self.transmitting = False
+        tailed = self.tail_deadline is not None
+        self.tail_deadline = None
         frames = self.tx_frames
         self.tx_frames = []
         heard = self.detector.heard_speech
         log.info("transmission ended (%s), %.1fs, speech=%s", reason, len(frames) * 0.02, heard)
         if self.rec:
-            self.rec.event("tx_end", reason=reason, seconds=round(len(frames) * 0.02, 1), speech=heard)
-        await self.send_audio(radio.to_phone(radio.squelch_tail()), mark=False)
+            self.rec.event("tx_end", reason=reason, seconds=round(len(frames) * 0.02, 1), speech=heard, tailed=tailed)
+        if squelch:
+            await self.send_audio(radio.to_phone(radio.squelch_tail()), mark=False)
         live, self.live = self.live, None
         if not heard:
             if live:
@@ -292,7 +317,7 @@ class CallSession:
             terms.append(dest.spoken_name)
         return terms
 
-    async def _handle_pilot(self, pcm: np.ndarray, live: deepgram.LiveTranscriber | None = None) -> None:
+    async def _handle_pilot(self, pcm: np.ndarray, live=None) -> None:
         t0 = time.monotonic()
         text = await live.finish() if live else None
         if text is None:  # no streaming STT, or it failed: transcribe the clip
