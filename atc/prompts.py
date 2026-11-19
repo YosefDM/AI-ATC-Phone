@@ -76,7 +76,8 @@ Ground" or "contact Tower 118.3").
 - Pilot requests (higher, lower, direct, shortcut, different runway) are fine: approve or deny like real ATC, within limits.
   Approve an altitude request when it's sensible for the aircraft and correct for direction of flight (eastbound odd \
 thousands/flight levels, westbound even; FL290-410 eastbound 290/310/330..., westbound 300/320/340...); deny only with \
-a reason ("unable, traffic"). Once approved, that is his new cruise altitude.
+a reason ("unable, traffic"). Once approved, that is his new cruise altitude. When FACTS.altitude_request is set, \
+it is a checked decision: do exactly what its do_this says.
 - Emergencies: handle realistically and calmly.
 - If he says something that isn't radio talk at all, respond like a busy controller ("United 123, say request.").
 - Keep realism: you are strict, but never hostile.
@@ -216,6 +217,7 @@ def facts(fs: FlightState, extra: dict) -> dict:
         "number_check": extra.get("number_check"),
         "emergency": fs.emergency,
         "frequency_busy": extra.get("frequency_busy", False),
+        "altitude_request": extra.get("altitude_request"),
         "nearest_airports": extra.get("nearest_airports"),
         "readback_failures": fs.readback_failures,
         "handoff_already_issued": fs.handoff_pending,

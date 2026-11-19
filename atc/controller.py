@@ -224,6 +224,7 @@ class Controller:
             if req:
                 number_check = {"required_numbers": req, "missing_or_wrong": missing}
         self._number_check = number_check
+        self._altitude_request = self.check_altitude_request(text)
         fs.exchanges += 1
         fs.add_turn("pilot", text)
         await self._turn(f"PILOT: {text}", speak, pilot=True, number_check=number_check)
@@ -250,6 +251,8 @@ class Controller:
         extra["number_check"] = number_check
         extra["climb_target"] = self.climb_target()
         extra["frequency_busy"] = self.frequency_busy
+        extra["altitude_request"] = getattr(self, "_altitude_request", None) if pilot else None
+        self._altitude_request = None
         if fs.emergency:
             extra["nearest_airports"] = self.nearest_suitable()
         messages = build_messages(fs, extra, event_text)
@@ -318,6 +321,11 @@ class Controller:
         if state["mode"] in ("speak", "clearance"):
             full = " ".join(state["spoken"])
             track_assignments(fs, full)
+            req = extra.get("altitude_request")
+            if req and req.get("legal") and fs.assigned.get("altitude"):
+                want = int(req["requested"][2:]) * 100 if req["requested"].startswith("FL") else int(req["requested"])
+                if fs.assigned["altitude"] == want:
+                    fs.cruise_altitude = want  # an approved request is his new cruise, up or down
             if items or state.get("handoff") or state["mode"] == "clearance" or (pilot and rb == "incorrect"):
                 # after a correction ("negative, squawk 4441") he only needs to read back the corrected item,
                 # so his next readback is checked against the correction, not the whole original clearance
@@ -473,6 +481,37 @@ class Controller:
         fs.handoff_pending = False
         fs.emergency["divert_to"] = ap.ident
         log.info("diverting to %s; next: %s", ap.ident, [f.name for f in chain])
+
+    def check_altitude_request(self, text: str) -> dict | None:
+        """'requesting flight level 360' / 'request 12,000': is it legal for his direction and aircraft?"""
+        from .flight import _legal, aircraft_class
+        from .readback import normalize_numbers
+
+        fs = self.fs
+        if fs.facility.kind not in ("DEP", "CTR", "APP") or not fs.planned:
+            return None
+        t = normalize_numbers(text)
+        m = re.search(r"\brequest\w*\b.*?\b(?:flight level|fl)\s*(\d{2,3})\b", t, re.I)
+        alt = int(m.group(1)) * 100 if m else None
+        if alt is None:
+            m = re.search(r"\brequest\w*\b.*?\b(\d{1,2}000|\d{1,2}500)\b", t, re.I)
+            alt = int(m.group(1)) if m else None
+        if not alt:
+            return None
+        dep, dest = self.dep, self.dest
+        from .data.airports import bearing
+
+        east = bearing(dep.lat, dep.lon, dest.lat, dest.lon) < 180 if dest else True
+        cap = {"piston": 12500, "turboprop": 25000, "jet": 41000}[aircraft_class(fs.aircraft_type)]
+        legal = alt <= cap and _legal(alt, east) == alt
+        said = f"FL{alt // 100}" if alt >= 18000 else str(alt)
+        cur = fs.assigned.get("altitude") or fs.cruise_altitude or 0
+        verb = "climb" if alt > cur else "descend"
+        if legal:
+            return {"requested": said, "legal": True,
+                    "do_this": f"APPROVE it: '{fs.callsign}, {verb} and maintain {said}'. Do not refuse."}
+        why = "wrong altitude for direction of flight" if alt <= cap else "above the aircraft's ceiling"
+        return {"requested": said, "legal": False, "do_this": f"Refuse: '{fs.callsign}, unable {said}, {why}'."}
 
     def _template(self, state: dict, text: str) -> None:
         fs = self.fs
