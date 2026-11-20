@@ -3,6 +3,7 @@
 Keypad (defaults):
     1  press to start transmitting (mic click), press again to stop (squelch tail).
        If he forgets the second press, ~2 s of silence after speech ends it.
+    5  listen to a recorded demo flight, gate to gate (any key stops it)
     8  cockpit sounds (engines, chimes, callouts) on / off
     9  listen to the ATIS (any key stops it)
     0  help: which frequency he's on and how the keys work
@@ -210,6 +211,13 @@ class CallSession:
             self.rec.event("key", digit=digit)
         if self.menu is not None:
             await self._menu_key(digit)
+            return
+        if self.playing == "demo":
+            await self.stop_playback()  # any key ends the demo
+            await self.system("Demo stopped.")
+            return
+        if digit == "5" and not self.transmitting:
+            await self.play_demo()
             return
         if digit == settings.ptt_key:
             if self.transmitting and self.tail_deadline is not None:
@@ -491,6 +499,8 @@ class CallSession:
             asyncio.create_task(self._refresh_traffic())
         if self.effective_chatter == "off" or not deepgram.enabled() or fs is None or fs.complete:
             return False
+        if self.director and now < self.director.hold_until:
+            return False  # takeoff roll / landing: the frequency stays clear for his callouts
         if now < self.next_chatter_at:
             return False
         quiet_since = max(fs.last_activity, self.last_atc_to_him)
@@ -660,6 +670,19 @@ class CallSession:
             await self.send_audio(rs.process(chunk, rate), mark=False)
         await self.send_audio(radio.to_phone(radio.squelch_tail()))
 
+    async def play_demo(self) -> None:
+        """A recorded gate-to-gate flight, so someone who isn't a pilot can hear what it all sounds like."""
+        pcm = demo_audio()
+        if pcm is None:
+            await self.system("The demo flight isn't available right now.")
+            return
+        await self.cancel_work()
+        if self.playing:
+            await self.stop_playback()
+        await self.system("Demo flight, Newark to Boston. Press any key to stop.")
+        self.playing = "demo"
+        await self.send_audio(pcm)
+
     async def help(self) -> None:
         fac = self.fs.facility
         state = f"You're talking to {fac.name} on {spoken.frequency(fac.freq)}."
@@ -667,7 +690,7 @@ class CallSession:
             nf = self.fs.next_facility
             state = f"You've been told to contact {nf.name} on {spoken.frequency(nf.freq)}."
         await self.system(f"{state} Press one to talk and one again when you're done. Nine for the ATIS. "
-                          "Star twice for a new flight.")
+                          "Five for a demo flight. Star twice for a new flight.")
 
     async def system(self, text: str, wait: bool = False) -> None:
         """Out-of-radio prompts, in a clean narrator voice."""
@@ -701,6 +724,20 @@ class CallSession:
         if self.playing == "atc" and self.ctl:
             self.ctl.touch()
         self.playing = None
+
+
+_DEMO: np.ndarray | None = None
+
+
+def demo_audio() -> np.ndarray | None:
+    """The recorded demo flight (scripts/make_demo.py), loaded once."""
+    global _DEMO
+    if _DEMO is None:
+        path = settings.data_dir.parent / "assets" / "demo_flight.ulaw"
+        if not path.exists():
+            return None
+        _DEMO = ulaw_decode(path.read_bytes())
+    return _DEMO
 
 
 class Mixer:
@@ -764,7 +801,7 @@ class Mixer:
         call = self.call
         while not call.closed:
             d = call.director
-            ck = d.cockpit if (d and call.cockpit_on and not d.cockpit.silent) else None
+            ck = d.cockpit if (d and call.cockpit_on and not d.cockpit.silent and call.playing != "demo") else None
             busy = self.cur is not None or bool(self.queue)
             if not busy and ck is None:
                 self.t0 = None

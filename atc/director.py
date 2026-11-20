@@ -29,12 +29,15 @@ log = logging.getLogger(__name__)
 FIRST_OFFICER = Voice("aura-2-arcas-en", speed=1.1)  # the other pilot's callouts
 GPWS = Voice("aura-2-zeus-en", speed=1.0)  # the automated altitude callouts
 _CLIP_CACHE: dict[tuple[str, str], np.ndarray] = {}
+CALLOUT_LEVEL = 0.55  # before the cockpit gain: clearly over the engines, still under the radio
 
 
 class Director:
-    def __init__(self, call, fs: FlightState):
+    def __init__(self, call, fs: FlightState, clock=time.time):
         self.call = call
         self.fs = fs
+        self.now = clock  # wall clock on calls; a virtual clock when rendering the demo flight
+        self.pending: list[tuple[float, float]] = []  # (when, engine target) still to come
         klass = aircraft_class(fs.aircraft_type)
         self.airliner = klass != "piston"
         self.cockpit = Cockpit("jet" if self.airliner else "prop")
@@ -107,9 +110,7 @@ class Director:
         self.cockpit.play(sound, delay)
 
     def _throttle(self, target: float, delay: float = 0.0) -> None:
-        def set_it():
-            self.cockpit.engine.target = target
-        asyncio.get_running_loop().call_later(delay, set_it)
+        self.pending.append((self.now() + delay, target))
 
     def _say(self, text: str, voice: Voice, at: float) -> None:
         """A spoken cockpit callout at absolute time `at` (synthesized now, played on time)."""
@@ -119,13 +120,13 @@ class Director:
             if clip is None:
                 audio, rate = await self.call.svc.tts.synthesize_async(text, voice)
                 clip = resample(audio, rate, PHONE_RATE)
-                clip = clip / (np.abs(clip).max() + 1e-9) * 0.22  # a cockpit voice, quieter than the radio
+                clip = clip / (np.abs(clip).max() + 1e-9) * CALLOUT_LEVEL
                 _CLIP_CACHE[key] = clip
-            self._play(clip, max(0.0, at - time.time()))
+            self._play(clip, max(0.0, at - self.now()))
         asyncio.create_task(go())
 
     def _hold(self, seconds: float, nudges: float | None = None) -> None:
-        now = time.time()
+        now = self.now()
         self.hold_until = max(self.hold_until, now + seconds)
         self.hold_nudges_until = max(self.hold_nudges_until, now + (nudges if nudges is not None else seconds))
 
@@ -140,7 +141,7 @@ class Director:
 
     def tick(self) -> None:
         """Called a few times a second: start any sequence the flight just reached."""
-        fs, now = self.fs, time.time()
+        fs, now = self.fs, self.now()
         if fs.emergency and self._start("emergency"):
             said = fs.emergency.get("what_he_said", "")
             if re.search(r"\bfire\b|smoke", said, re.I):
@@ -169,7 +170,11 @@ class Director:
             self._throttle(OFF, 2)
             if self.airliner:
                 self._play(fx.seatbelt_chime(), 6)
-        if now >= self.hold_until:
+        for when, target in sorted(self.pending):
+            if when <= now:
+                self.cockpit.engine.target = target
+        self.pending = [(w, t) for w, t in self.pending if w > now]
+        if now >= self.hold_until and not self.pending:
             self.cockpit.engine.target = self.steady()
         if fs.facility.kind == "CTR" and random.random() < 0.004:  # now and then a little light chop
             self.cockpit.turbulence(random.uniform(4, 10))

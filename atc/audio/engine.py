@@ -66,7 +66,8 @@ class EngineSound:
             ph2 = self.whine2_phase + 2 * np.pi * np.cumsum(f2) / RATE
             self.whine_phase, self.whine2_phase = ph[-1] % (2 * np.pi), ph2[-1] % (2 * np.pi)
             wobble = 1 + 0.15 * np.sin(np.arange(n) / RATE * 2 * np.pi * 0.7)
-            whine = (0.022 * np.sin(ph) + 0.010 * np.sin(ph2)) * t_gain * wobble
+            # the whine is what makes it a jet, but at full power it must not compete with voices
+            whine = (0.022 * np.sin(ph) + 0.010 * np.sin(ph2)) * t_gain * (1.0 - 0.45 * t_gain) * wobble
             sound = roar + whine
         else:
             # piston + propeller: a buzzy pulse train at the firing frequency, heard through its harmonics
