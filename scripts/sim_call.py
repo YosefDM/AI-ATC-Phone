@@ -86,12 +86,14 @@ class FakeTwilio:
         await self.send_pcm(np.zeros(int(seconds * PHONE_RATE), dtype=np.int16), realtime)
 
     async def wait_quiet(self, timeout: float) -> bool:
-        """Wait for a mark (end of a transmission), then for 3 s with no further audio (a reply may follow
-        a background call)."""
-        try:
-            await asyncio.wait_for(self.marks.get(), timeout)
-        except asyncio.TimeoutError:
-            return False
+        """Wait for some audio, then for 3 s with no further audio (run the server with COCKPIT=off, or the
+        cockpit sounds never stop)."""
+        start = time.monotonic()
+        n0 = len(self.recv_audio)
+        while len(self.recv_audio) == n0:
+            if time.monotonic() - start > timeout:
+                return False
+            await asyncio.sleep(0.2)
         n = -1
         while n != len(self.recv_audio):
             n = len(self.recv_audio)
@@ -133,8 +135,6 @@ async def main(a):
             pcm = to_int16(resample(audio, rate, PHONE_RATE) * 0.7)
             print(f"PILOT:  {line}")
             await tw.silence(0.3)
-            while not tw.marks.empty():  # forget marks from chatter played before this transmission
-                tw.marks.get_nowait()
             await tw.dtmf("1")
             await tw.send_pcm(pcm)
             if turn % 2 == 0:

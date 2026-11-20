@@ -178,8 +178,7 @@ async def media(ws: WebSocket):
                 if session:
                     await session.on_dtmf(msg["dtmf"]["digit"])
             elif ev == "mark":
-                if session:
-                    await session.on_mark(msg["mark"]["name"])
+                pass  # playback is tracked by our own mixer now
             elif ev == "start":
                 start = msg["start"]
                 params = start.get("customParameters") or {}

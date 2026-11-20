@@ -55,6 +55,7 @@ class Settings:
     admin_token: str = field(default_factory=lambda: os.getenv("ADMIN_TOKEN", ""))
     record_calls: bool = field(default_factory=lambda: os.getenv("RECORD_CALLS", "1") not in ("0", "false", "no"))
     keep_recordings: int = field(default_factory=lambda: int(os.getenv("KEEP_RECORDINGS", "150")))
+    cockpit_default: bool = field(default_factory=lambda: os.getenv("COCKPIT", "on") not in ("0", "off", "no", "false"))
     chatter_default: str = field(default_factory=lambda: os.getenv("CHATTER", "auto"))  # auto / off / light / normal / busy
 
     # Flight

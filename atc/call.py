@@ -3,6 +3,7 @@
 Keypad (defaults):
     1  press to start transmitting (mic click), press again to stop (squelch tail).
        If he forgets the second press, ~2 s of silence after speech ends it.
+    8  cockpit sounds (engines, chimes, callouts) on / off
     9  listen to the ATIS (any key stops it)
     0  help: which frequency he's on and how the keys work
     7  background radio chatter: auto (as busy as the real sky right now) / off / light / normal / busy
@@ -30,11 +31,12 @@ from .audio.codec import FRAME_SAMPLES, PHONE_RATE, resample, to_int16, ulaw_dec
 from .audio.detect import SpeechDetector, is_dtmf_frame, mute_dtmf
 from . import chatter
 from .config import settings
+from .director import Director
 from .recorder import CallRecorder
 from .controller import Controller
 from .data.airports import AirportDB
 from .data.weather import active_runway, atis_spoken, get_weather, prefetch
-from .flight import Facility, FlightState, start_flight
+from .flight import Facility, FlightState, aircraft_class, start_flight
 from .speech import spoken
 from .speech.stt import STT
 from .speech import deepgram
@@ -49,6 +51,8 @@ calls_log = logging.getLogger("atc.transcript")
 # seconds of quiet between background exchanges; "auto" picks one of these from live traffic
 CHATTER_GAPS = {"off": (0, 0), "sparse": (40.0, 80.0), "light": (20.0, 40.0), "normal": (10.0, 20.0), "busy": (5.0, 10.0)}
 CHATTER_CYCLE = ["auto", "off", "light", "normal", "busy"]
+COCKPIT_GAIN = 0.42  # cockpit sounds sit well under the radio (cruise ~18 dB below ATC)
+COCKPIT_DUCK = 0.12  # ...and almost nothing while he's talking (keeps it out of his mic and the recognizer)
 TAIL_QUIET_S = 0.25  # this much quiet after the key press means his last word has ended
 TAIL_MAX_S = 0.8  # never wait longer than this after the key press
 # other aircraft: farther away and weaker than the controller's ground station
@@ -113,6 +117,9 @@ class CallSession:
         self.is_owner = settings.caller_allowed(caller)
 
         self.rec = CallRecorder(call_sid, caller) if settings.record_calls else None
+        self.director: Director | None = None
+        self.cockpit_on = settings.cockpit_default
+        self.mixer = Mixer(self)
 
     # ------------------------------------------------------------ lifecycle
 
@@ -133,6 +140,7 @@ class CallSession:
 
     def _use_flight(self, fs: FlightState) -> None:
         self.fs = fs
+        self.director = Director(self, fs)
         if self.rec:
             self.rec.flight_id = fs.id
         self.ctl = Controller(fs, self.svc.db)
@@ -155,6 +163,7 @@ class CallSession:
 
     async def close(self) -> None:
         self.closed = True
+        self.mixer.stop()
         if self.work and not self.work.done():
             self.work.cancel()
         if self.fs and self.fs.callsign:
@@ -221,6 +230,9 @@ class CallSession:
             await self.play_atis()
         elif digit == settings.help_key:
             await self.help()
+        elif digit == "8":
+            self.cockpit_on = not self.cockpit_on
+            await self.system(f"Cockpit sounds {'on' if self.cockpit_on else 'off'}.")
         elif digit == settings.chatter_key:
             self.chatter_level = CHATTER_CYCLE[(CHATTER_CYCLE.index(self.chatter_level) + 1) % len(CHATTER_CYCLE)]
             self._schedule_chatter()
@@ -407,6 +419,17 @@ class CallSession:
             await asyncio.sleep(0.5)
             await self.system("Flight complete. Nice flying. Press star twice for a new flight, or hang up.", wait=True)
 
+    def _tick_director(self) -> None:
+        d = self.director
+        # the type is usually only known once he files: give a small plane its propeller
+        if self.fs.aircraft_type and d.airliner != (aircraft_class(self.fs.aircraft_type) != "piston") \
+                and d.cockpit.engine.n1 < 0.01:
+            self.director = d = Director(self, self.fs)
+        try:
+            d.tick()
+        except Exception:  # noqa: BLE001
+            log.exception("cockpit director failed")
+
     async def _timer_loop(self) -> None:
         """Fires 'time passes' and 'no response' events while the frequency is quiet."""
         while not self.closed:
@@ -414,12 +437,16 @@ class CallSession:
             if (self.transmitting or self.playing or self.offer_resume or not self.ctl
                     or (self.work and not self.work.done())):
                 continue
+            if self.director:
+                self._tick_director()
             if self.menu is not None:
                 if time.time() - self.menu["at"] > 45:
                     self.menu = None  # abandoned menu: back to the radio
                 continue
             now = time.time()
             nudge = self.ctl.next_nudge()
+            if nudge and self.director and now < self.director.hold_nudges_until:
+                nudge = None  # mid-takeoff / mid-landing: the controller waits for the airplane
             if nudge and now >= nudge[1]:
                 log.info("timer event: %s", nudge[0])
                 self.work = asyncio.create_task(self._handle_event(nudge[0]))
@@ -653,26 +680,20 @@ class CallSession:
     # ------------------------------------------------------------ outbound plumbing
 
     async def send_audio(self, pcm8k: np.ndarray, mark: bool = True) -> None:
+        """Queue radio audio for him; the mixer plays it in order, over the cockpit sounds."""
         if self.closed or len(pcm8k) == 0:
             return
-        data = ulaw_encode(pcm8k)
-        if self.rec:
-            self.rec.add_outbound(pcm8k)
-        async with self._send_lock:
-            step = FRAME_SAMPLES * 25  # half-second chunks
-            for i in range(0, len(data), step):
-                await self.ws.send_text(json.dumps({
-                    "event": "media", "streamSid": self.stream_sid,
-                    "media": {"payload": base64.b64encode(data[i : i + step]).decode()}}))
-            if mark:
-                self.mark_seq += 1
-                name = f"m{self.mark_seq}"
-                self.pending_marks.add(name)
-                await self.ws.send_text(json.dumps({"event": "mark", "streamSid": self.stream_sid, "mark": {"name": name}}))
+        name = None
+        if mark:
+            self.mark_seq += 1
+            name = f"m{self.mark_seq}"
+            self.pending_marks.add(name)
+        self.mixer.enqueue(pcm8k, name)
 
     async def stop_playback(self) -> None:
         if self.closed:
             return
+        self.mixer.clear()
         await self.ws.send_text(json.dumps({"event": "clear", "streamSid": self.stream_sid}))
         self.pending_marks.clear()
         if self.rec:
@@ -680,6 +701,99 @@ class CallSession:
         if self.playing == "atc" and self.ctl:
             self.ctl.touch()
         self.playing = None
+
+
+class Mixer:
+    """Sends him one continuous stream: queued radio audio mixed over the cockpit sounds.
+
+    Paced in real time (a quarter second ahead of playback), so it always knows what he is
+    hearing right now: a queued 'mark' fires when its audio has actually played, and
+    clear() can cut everything instantly.
+    """
+
+    LEAD = 0.25
+    FRAME = 160  # 20 ms
+
+    def __init__(self, call: "CallSession"):
+        self.call = call
+        self.queue: collections.deque = collections.deque()  # int16 arrays, or ("mark", name)
+        self.cur: np.ndarray | None = None
+        self.pos = 0
+        self.t0: float | None = None
+        self.sent = 0
+        self.task = asyncio.create_task(self._run())
+
+    def enqueue(self, pcm: np.ndarray, mark: str | None) -> None:
+        self.queue.append(pcm.astype(np.int16))
+        if mark:
+            self.queue.append(("mark", mark))
+
+    def clear(self) -> None:
+        self.queue.clear()
+        self.cur = None
+        self.t0 = None
+
+    def stop(self) -> None:
+        self.task.cancel()
+
+    def _voice(self, n: int, play_at: float) -> np.ndarray | None:
+        out = np.zeros(n, dtype=np.float32)
+        got = False
+        filled = 0
+        while filled < n:
+            if self.cur is None:
+                if not self.queue:
+                    break
+                item = self.queue.popleft()
+                if isinstance(item, tuple):  # a mark: fires when this point actually plays
+                    delay = max(0.0, play_at + filled / PHONE_RATE - time.monotonic())
+                    asyncio.get_running_loop().call_later(
+                        delay, lambda m=item[1]: asyncio.create_task(self.call.on_mark(m)))
+                    continue
+                self.cur, self.pos = item, 0
+            k = min(n - filled, len(self.cur) - self.pos)
+            out[filled : filled + k] = self.cur[self.pos : self.pos + k] / 32768.0
+            filled += k
+            self.pos += k
+            got = True
+            if self.pos >= len(self.cur):
+                self.cur = None
+        return out if got else None
+
+    async def _run(self) -> None:
+        call = self.call
+        while not call.closed:
+            d = call.director
+            ck = d.cockpit if (d and call.cockpit_on and not d.cockpit.silent) else None
+            busy = self.cur is not None or bool(self.queue)
+            if not busy and ck is None:
+                self.t0 = None
+                await asyncio.sleep(0.02)
+                continue
+            now = time.monotonic()
+            if self.t0 is None:
+                self.t0, self.sent = now, 0
+            frames = []
+            while self.sent < (now - self.t0 + self.LEAD) * PHONE_RATE:
+                play_at = self.t0 + self.sent / PHONE_RATE
+                v = self._voice(self.FRAME, play_at)
+                mix = v if v is not None else np.zeros(self.FRAME, dtype=np.float32)
+                if ck is not None:
+                    mix = mix + ck.render(self.FRAME) * COCKPIT_GAIN * (COCKPIT_DUCK if call.transmitting else 1.0)
+                frames.append(to_int16(mix))
+                self.sent += self.FRAME
+                if v is None and ck is None:
+                    break
+            if frames:
+                pcm = np.concatenate(frames)
+                if call.rec:
+                    call.rec.add_outbound(pcm)
+                try:
+                    await call.ws.send_text(json.dumps({"event": "media", "streamSid": call.stream_sid,
+                                                        "media": {"payload": base64.b64encode(ulaw_encode(pcm)).decode()}}))
+                except Exception:  # noqa: BLE001
+                    return
+            await asyncio.sleep(0.02)
 
 
 class Outgoing:
