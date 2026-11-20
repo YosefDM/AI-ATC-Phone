@@ -29,7 +29,7 @@ log = logging.getLogger(__name__)
 FIRST_OFFICER = Voice("aura-2-arcas-en", speed=1.1)  # the other pilot's callouts
 GPWS = Voice("aura-2-zeus-en", speed=1.0)  # the automated altitude callouts
 _CLIP_CACHE: dict[tuple[str, str], np.ndarray] = {}
-CALLOUT_LEVEL = 0.55  # before the cockpit gain: clearly over the engines, still under the radio
+CALLOUT_LEVEL = 0.75  # before the cockpit gain: clearly over the engines, still under the radio
 
 
 class Director:
