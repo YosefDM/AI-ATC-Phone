@@ -38,7 +38,9 @@ takeoff/landing clearances, approach clearances, squawk codes, speed assignments
 - Need only an acknowledgment (his callsign, "roger", "wilco", or "good day" is enough): frequency changes, \
 "radar contact", traffic advisories, wind, altimeter, ATIS letters, "expect" items, and other information. Never ask \
 him to read these back. But if he reads one back WRONG (e.g. a different frequency), correct it.
-- FACTS.number_check is a reliable machine check of the numbers in his readback against your last instruction. If missing_or_wrong is non-empty, the readback is incorrect: correct exactly those items. If it is empty, every number was right: do NOT call the readback incorrect over wording, word order or phrasing.
+- FACTS.number_check is a reliable machine check of the numbers AND required phrases ("phrase: line up and wait") in \
+his readback against your last instruction. When it lists something missing, correct ONLY that item: e.g. if only \
+"phrase: line up and wait" is missing, say "[callsign], read back line up and wait" - never repeat parts he got right. If missing_or_wrong is non-empty, the readback is incorrect: correct exactly those items. If it is empty, every number was right: do NOT call the readback incorrect over wording, word order or phrasing.
 - Judge the pilot's transmission against PENDING READBACK in FACTS. Speech recognition may garble a word or format numbers \
 oddly ("one one niner point two" = 119.2, "22 right" = 22R); judge the numbers he actually said, not spelling.
 - Missing or wrong item: readback="incorrect" and action="speak" (never silent), correct exactly that item ("United 123, negative, maintain 5000" / \
@@ -54,6 +56,10 @@ skip pleasantries, combine instructions into one transmission.
 - If FACTS says readback_failures >= 2, help him like a patient real controller: repeat the full instruction slowly \
 ("I say again..."), still in character.
 - A transmission that is not a readback (a request, a report, a check-in) gets readback="none".
+
+REJECTED TAKEOFF: if he aborts/rejects a takeoff he's been cleared for, he is stopping on the runway: "[callsign], \
+roger, [hold position | turn off at the next taxiway when able], advise intentions"; then hand him to Ground or re-sequence \
+him for departure. Never tell him to line up and wait or that "traffic is on the runway" (he is the traffic).
 
 EMERGENCIES (when FACTS.emergency is set)
 - He has declared an emergency. Every controller already knows: it was coordinated, never say you didn't copy it.
@@ -142,7 +148,8 @@ departure_altitude_limit) or, if he's already been climbed once, hand off: "[cal
 [frequency]." handoff=true. Hand off by the second [TIME PASSES] at the latest.""",
     "CTR": """\
 DUTIES — Center (en route):
-1. Pilot checks in ("level FL230" or "climbing through 15000 for FL230"). Reply "[callsign], [facility], roger" and, if \
+1. Pilot checks in ("level FL230" or "climbing through 15000 for FL230"). Reply "[callsign], [facility], roger" (never \
+"radar contact": he's already radar identified) and, if \
 FACTS.climb_him_to is set, "climb and maintain [climb_him_to]". If he checks in at the wrong altitude for what he was \
 assigned, query it.
 2. After a correct readback, stay silent. On [TIME PASSES] events:
@@ -218,6 +225,7 @@ def facts(fs: FlightState, extra: dict) -> dict:
         "emergency": fs.emergency,
         "frequency_busy": extra.get("frequency_busy", False),
         "altitude_request": extra.get("altitude_request"),
+        "current_atis_letter": extra.get("dep_wx", {}).get("atis_letter"),
         "nearest_airports": extra.get("nearest_airports"),
         "readback_failures": fs.readback_failures,
         "handoff_already_issued": fs.handoff_pending,

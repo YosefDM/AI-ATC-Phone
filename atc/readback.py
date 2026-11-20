@@ -73,6 +73,17 @@ def normalize_numbers(text: str) -> str:
     return " ".join(out)
 
 
+# Safety-critical phrases that must be read back along with the numbers, and what counts as having
+# said them (speech recognition mangles them: "let's take off", "clear to land", "lining up").
+PHRASES = [
+    ("cleared for takeoff", r"\bcleared (?:for )?(?:immediate )?take ?off\b", r"take ?off|takeoff"),
+    ("line up and wait", r"\bline up and wait\b", r"line up|lining up|\bwait\b"),
+    ("hold short", r"\bhold short\b", r"hold(?:ing)? short|\bshort\b"),
+    ("cleared to land", r"\bcleared to land\b", r"\bland\b|landing"),
+    ("approach clearance", r"\bcleared (?:ils|rnav|gps|visual|vor|loc)\b.*\bapproach\b|\bcleared .*\bapproach\b", r"approach|cleared"),
+]
+
+
 def required_items(atc_text: str) -> list[str]:
     """Numbers a pilot must read back from an ATC transmission, in normalized form."""
     t = atc_text
@@ -97,6 +108,9 @@ def required_items(atc_text: str) -> list[str]:
         items.append(m.group(1).replace(",", ""))
     for m in re.finditer(r"\brunway\s+(\d{1,2})([LRC])?\b", t, re.I):
         items.append(f"runway {int(m.group(1))}{(' ' + _SIDES[m.group(2).lower()]) if m.group(2) else ''}")
+    for name, said_by_atc, _ in PHRASES:
+        if re.search(said_by_atc, atc_text, re.I):
+            items.append(f"phrase: {name}")
     seen, out = set(), []
     for x in items:
         if x not in seen:
@@ -115,7 +129,10 @@ def check(atc_text: str, pilot_text: str) -> tuple[list[str], list[str]]:
     joined = "".join(p_digits.split())
     missing = []
     for item in req:
-        if item.startswith("runway "):
+        if item.startswith("phrase: "):
+            name = item[len("phrase: "):]
+            ok = any(re.search(heard, pilot_text, re.I) for n, _, heard in PHRASES if n == name)
+        elif item.startswith("runway "):
             parts = item.split()
             num, side = parts[1], (parts[2] if len(parts) > 2 else None)
             ok = re.search(rf"\b{num}\b" + (rf"\s*{side}" if side else ""), p) is not None

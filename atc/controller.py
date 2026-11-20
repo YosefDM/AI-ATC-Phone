@@ -110,6 +110,8 @@ class Controller:
         if fs.expects_reply and fs.no_response_count < 2:
             return "no_response", fs.last_activity + NO_RESPONSE_AFTER_S
         key = duty_key(fs.facility)
+        if key == "GND_dep" and not self._said_here(r"\btaxi via\b|\btaxi to runway\b|runway \w+, taxi\b"):
+            return None  # pushed back, not taxiing yet: it's his turn to call ready to taxi
         if key in PROGRESS_DELAY_S and fs.exchanges >= 1 and fs.progress_nudges < MAX_PROGRESS_NUDGES and not fs.expects_reply:
             return "progress", fs.last_activity + PROGRESS_DELAY_S[key]
         return None
@@ -140,7 +142,8 @@ class Controller:
         nxt = fs.next_facility
         handoff = f"hand him off to {nxt.name} {nxt.freq} (handoff=true)." if nxt else "finish up."
         if key == "GND_dep":
-            return handoff if self._said_here(r"\btaxi\b") else "issue his taxi clearance to the departure runway."
+            issued = self._said_here(r"\btaxi via\b|\btaxi to runway\b|runway \w+, taxi\b")
+            return handoff if issued else "wait for him to call ready to taxi, then issue his taxi clearance (runway, route)."
         if key == "TWR_dep":
             return handoff if self._said_here(r"cleared for takeoff") else "clear him for takeoff."
         if key in ("DEP", "CTR"):
@@ -211,12 +214,18 @@ class Controller:
             return
 
         if not fs.clearance_issued:
-            # guess the destination from "...to Boston with information..." and warm its weather now
-            m = re.search(r"\bto\s+([a-z' ]{3,40}?)(?=\s+(?:with|information|request|we|at)\b|[,.]|$)", low)
+            # take what he already said ourselves, so Clearance never asks for it again
+            m = re.search(r"\bto\s+([a-z' .]{2,40}?)(?=\s+(?:with|information|request|we|at|type|united|delta)\b|[,.]|$)", low)
             if m:
-                guess = self.db.search(m.group(1), near=(self.dep.lat, self.dep.lon))
+                guess = self._resolve_destination(m.group(1))
                 if guess:
                     prefetch(guess)
+                    if not fs.destination and guess.ident != fs.departure:
+                        fs.destination = guess.ident
+            if not fs.aircraft_type:
+                t = aircraft_type_in(text)
+                if t:
+                    fs.aircraft_type = t
         number_check = None
         ref = fs.readback_ref or fs.last_atc_text
         if ref and (fs.expects_reply or fs.handoff_pending or fs.pending_readback):
@@ -230,7 +239,10 @@ class Controller:
             if req:
                 number_check = {"required_numbers": req, "missing_or_wrong": missing}
         self._number_check = number_check
-        self._altitude_request = self.check_altitude_request(text)
+        rep_alt = reported_altitude(text)
+        if rep_alt:
+            fs.assigned["reported_altitude"] = rep_alt  # where he says he is ("with you at 13,000")
+        self._altitude_request = self.check_altitude_request(text) or self.check_approach_request(text)
         fs.exchanges += 1
         fs.add_turn("pilot", text)
         await self._turn(f"PILOT: {text}", speak, pilot=True, number_check=number_check)
@@ -275,12 +287,23 @@ class Controller:
         result = await self.brain.respond(messages, on_decision, on_sentence)
         rb = result.get("readback", "none")
         if pilot and state["mode"] == "silent" and not state.get("advanced") and (
-                rb == "incorrect" or state.get("recheck") or (rb == "none" and not _is_ack(event_text))):
+                rb == "incorrect" or state.get("recheck") or state.get("recheck_ok") or state.get("recheck_action")
+                or (rb == "none" and not _is_ack(event_text))):
             # a wrong readback always gets corrected; a request or check-in always gets an answer
             log.info("model went silent (readback=%s, recheck=%s); asking again", rb, state.get("recheck"))
             missing = state.get("recheck")
-            state = {"mode": "speak", "spoken": [], "handoff": False}
-            if missing:
+            present = state.get("recheck_ok")
+            bad_action = state.get("recheck_action")
+            state = {"mode": "speak", "spoken": [], "handoff": False, "rechecked": True}
+            if bad_action:
+                why = ("You are not Clearance Delivery: action \"issue_clearance\" is not available to you. Write your "
+                       "actual transmission in say.")
+            elif present:
+                why = (f"The machine number check confirms he read back ALL of these correctly: {present}. "
+                       "Speech recognition formats numbers differently ('22 right' = 22R); that is NOT an error. "
+                       "Unless he left out a required phrase that isn't a number (e.g. 'cleared for takeoff', 'hold "
+                       "short'), his readback is correct: readback=\"correct\" and action=\"silent\".")
+            elif missing:
                 why = (f"The machine number check shows these were missing or wrong in his readback: {missing}. "
                        "His readback is NOT correct (\"copy\"/\"roger\" is not a readback): readback=\"incorrect\"; "
                        "tell him what to read back.")
@@ -359,6 +382,13 @@ class Controller:
             state["mode"] = "silent"
             state["recheck"] = nc["missing_or_wrong"]
             return
+        if (pilot and readback == "incorrect" and nc is not None and nc.get("required_numbers")
+                and not nc.get("missing_or_wrong") and not fs.handoff_pending and not state.get("rechecked")):
+            # every number he had to read back is there: don't loop "negative, runway 22R" at him;
+            # ask once more with that spelled out (formatting like "22 right" vs "22R" is not an error)
+            state["mode"] = "silent"
+            state["recheck_ok"] = nc["required_numbers"]
+            return
         if (pilot and fs.handoff_pending and readback == "incorrect" and nc is not None
                 and not nc.get("missing_or_wrong")):
             # a handoff readback the number check accepts (a garbled frequency counts as an acknowledgment)
@@ -400,7 +430,10 @@ class Controller:
             state["mode"] = "clearance"
             return
         if action == "issue_clearance":
-            action = "speak"
+            # only Clearance Delivery issues the IFR clearance; anyone else picking it meant to speak
+            state["mode"] = "silent"
+            state["recheck_action"] = True
+            return
 
         if action == "silent":
             state["mode"] = "silent"
@@ -488,6 +521,26 @@ class Controller:
         fs.emergency["divert_to"] = ap.ident
         log.info("diverting to %s; next: %s", ap.ident, [f.name for f in chain])
 
+    def _resolve_destination(self, said: str):
+        alias = CITY_ALIASES.get(re.sub(r"[^a-z ]", "", said.lower()).strip())
+        return self.db.get(alias) if alias else self.db.search(said, near=(self.dep.lat, self.dep.lon))
+
+    def check_approach_request(self, text: str) -> dict | None:
+        """'requesting the ILS': approve it for his arrival runway if the field can support it."""
+        fs = self.fs
+        m = re.search(r"\brequest\w*\b.*?\b(ils|rnav|gps|visual)\b", text.lower())
+        if not m or fs.facility.kind not in ("APP", "CTR") or not fs.arr_runway:
+            return None
+        kind = m.group(1).upper() if m.group(1) != "visual" else "visual"
+        dest = self.dest
+        ok = kind == "visual" or (dest and dest.kind in ("large_airport", "medium_airport"))
+        want = (f"visual approach runway {fs.arr_runway}" if kind == "visual"
+                else f"{'RNAV' if kind == 'GPS' else kind} runway {fs.arr_runway} approach")
+        if ok:
+            fs.arr_approach = want
+            return {"requested": want, "do_this": f"APPROVE it: '{fs.callsign}, expect {want}'. Do not refuse."}
+        return None
+
     def check_altitude_request(self, text: str) -> dict | None:
         """'requesting flight level 360' / 'request 12,000': is it legal for his direction and aircraft?"""
         from .flight import _legal, aircraft_class
@@ -511,7 +564,7 @@ class Controller:
         cap = {"piston": 12500, "turboprop": 25000, "jet": 41000}[aircraft_class(fs.aircraft_type)]
         legal = alt <= cap and _legal(alt, east) == alt
         said = f"FL{alt // 100}" if alt >= 18000 else str(alt)
-        cur = fs.assigned.get("altitude") or fs.cruise_altitude or 0
+        cur = fs.assigned.get("reported_altitude") or fs.assigned.get("altitude") or fs.cruise_altitude or 0
         verb = "climb" if alt > cur else "descend"
         if legal:
             return {"requested": said, "legal": True,
@@ -541,7 +594,7 @@ class Controller:
         if upd.get("parking"):
             fs.parking = upd["parking"]
         if upd.get("destination") and not fs.clearance_issued:
-            ap = self.db.search(upd["destination"], near=(self.dep.lat, self.dep.lon))
+            ap = self._resolve_destination(upd["destination"])
             if ap and ap.ident != fs.departure:
                 fs.destination = ap.ident
             elif not fs.destination:
@@ -587,6 +640,45 @@ class Controller:
             self.fs.add_turn("atc", text)
             self.fs.last_atc_text = text
         self.touch()
+
+
+CITY_ALIASES = {"la": "KLAX", "l a": "KLAX", "lax": "KLAX", "los angeles": "KLAX", "vegas": "KLAS", "las vegas": "KLAS",
+                "dc": "KDCA", "d c": "KDCA", "san fran": "KSFO", "frisco": "KSFO", "nyc": "KJFK", "new york": "KJFK",
+                "chicago": "KORD", "houston": "KIAH", "dallas": "KDFW", "washington": "KDCA", "philly": "KPHL",
+                "atlanta": "KATL", "miami": "KMIA", "orlando": "KMCO", "boston": "KBOS", "denver": "KDEN",
+                "seattle": "KSEA", "phoenix": "KPHX", "detroit": "KDTW", "charlotte": "KCLT", "cleveland": "KCLE"}
+
+_TYPES = [(r"\b(?:boeing\s*)?7\s?(\d)\s?7\b", lambda m: f"B7{m.group(1)}7"),
+          (r"\b(?:airbus\s*)?a\s?3\s?([2-8])\s?([0-9])\b", lambda m: f"A3{m.group(1)}{m.group(2)}"),
+          (r"\b(?:boeing\s*)?7\s?3\s?7\b", lambda m: "B737"),
+          (r"\bcessna\s*1\s?7\s?2\b|\bc\s?172\b", lambda m: "C172"),
+          (r"\b(?:embraer|e)\s?1\s?7\s?5\b", lambda m: "E175"),
+          (r"\bcrj\s?(\d{3})\b", lambda m: f"CRJ{m.group(1)[0]}")]
+
+
+def aircraft_type_in(text: str) -> str | None:
+    """'type Boeing 777' / 'A320' / 'typoing 777' -> ICAO type designator."""
+    t = text.lower()
+    for pat, fn in _TYPES:
+        m = re.search(pat, t)
+        if m:
+            return fn(m)
+    return None
+
+
+def reported_altitude(text: str) -> int | None:
+    """'with you at 13,000' / 'level flight level 360' / 'passing 7000 for 13000' -> where he is now."""
+    from .readback import normalize_numbers
+
+    t = clean_transcript(normalize_numbers(text))
+    m = re.search(r"\b(?:at|level|passing|through)\s+(?:flight level|fl)\s*(\d{2,3})\b", t, re.I)
+    if m:
+        return int(m.group(1)) * 100
+    m = re.search(r"\b(?:at|level|passing|through)\s+(\d{1,2},?\d{3})\b", t, re.I)
+    if m:
+        v = int(m.group(1).replace(",", ""))
+        return v if 500 <= v <= 45000 else None
+    return None
 
 
 EMERGENCY_RE = re.compile(r"\b(may ?day|pan[\s-]?pan|declar\w* (an )?emergency|emergency landing|squawk\w* 7700|"

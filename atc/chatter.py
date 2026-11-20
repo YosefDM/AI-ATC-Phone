@@ -77,7 +77,7 @@ def _his_runway_state(fs: FlightState) -> str:
 
 
 def exchange(fs: FlightState, rng: random.Random | None = None, pool: list[str] | None = None,
-             seq: dict | None = None) -> list[Line]:
+             seq: dict | None = None, atis: str | None = None) -> list[Line]:
     """One realistic exchange between the current controller and another aircraft.
 
     `seq` persists across a call: which other aircraft are rolling, so a takeoff clearance only goes
@@ -92,7 +92,8 @@ def exchange(fs: FlightState, rng: random.Random | None = None, pool: list[str] 
     tw1 = rng.choice(TAXIWAYS)
     name = fac.name
     nxt = fs.next_facility
-    letter = rng.choice(["Alpha", "Bravo", "Charlie", "Delta", "Echo", "Foxtrot", "Golf", "Hotel"])
+    # everyone on the frequency has the same current ATIS (he noticed when they didn't)
+    letter = atis or rng.choice(["Alpha", "Bravo", "Charlie", "Delta", "Echo", "Foxtrot", "Golf", "Hotel"])
 
     def atc(t: str) -> Line:
         return Line("atc", t, cs)

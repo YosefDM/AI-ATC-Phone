@@ -439,9 +439,14 @@ class CallSession:
         return True
 
     async def _play_chatter(self) -> None:
-        lines = chatter.exchange(self.fs, pool=self.callsign_pool, seq=self.chatter_seq)
+        try:
+            _, wx = await self.ctl.atis_airport()
+            atis = wx.atis_word
+        except Exception:  # noqa: BLE001
+            atis = None
+        lines = chatter.exchange(self.fs, pool=self.callsign_pool, seq=self.chatter_seq, atis=atis)
         if self.effective_chatter == "busy" and random.random() < 0.35:
-            lines = lines + chatter.exchange(self.fs, pool=self.callsign_pool, seq=self.chatter_seq)  # back-to-back, like a busy frequency
+            lines = lines + chatter.exchange(self.fs, pool=self.callsign_pool, seq=self.chatter_seq, atis=atis)  # back-to-back, like a busy frequency
         self._schedule_chatter()
         if not lines:
             return

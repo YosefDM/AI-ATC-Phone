@@ -167,3 +167,14 @@ def test_tower_chatter_follows_runway_sequence():
                 rolling.add(ln.callsign)
             if "contact departure" in t:
                 rolling.discard(ln.callsign)
+
+
+def test_required_phrases_in_readback():
+    from atc.readback import check
+
+    luaw = "United 118, Newark Tower, wind 210 at 6, runway 22R, line up and wait."
+    assert check(luaw, "United 118, runway 22 right.")[1] == ["phrase: line up and wait"]
+    assert check(luaw, "Line up and wait runway 22 right, United 118.")[1] == []
+    tko = "United 118, runway 22R, fly runway heading, cleared for takeoff."
+    assert check(tko, "Let's take off 22 right, United 118.")[1] == []  # recognition's "let's take off" still counts
+    assert check(tko, "Cleared for takeoff, United 118.")[1] == ["runway 22 right"]
