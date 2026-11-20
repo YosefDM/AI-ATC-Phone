@@ -8,6 +8,7 @@ the same logic.
 from __future__ import annotations
 
 import logging
+import random
 import re
 import time
 from collections.abc import Awaitable, Callable
@@ -65,7 +66,8 @@ class Controller:
         self.db = db
         self.brain = brain or Brain()
         self._number_check: dict | None = None
-        self.frequency_busy = False  # set by the call from the chatter level; busy = terser controllers
+        self.frequency_busy = False
+        self.traffic: dict | None = None  # set by the call: chatter traffic his controller should know about  # set by the call from the chatter level; busy = terser controllers
 
     # ------------------------------------------------------------ context
 
@@ -269,6 +271,11 @@ class Controller:
         extra["number_check"] = number_check
         extra["climb_target"] = self.climb_target()
         extra["frequency_busy"] = self.frequency_busy
+        extra["traffic"] = self.traffic
+        if duty_key(fs.facility) == "GND_arr" and "gate" not in fs.assigned:
+            airline = fs.callsign and not re.match(r"N\d", fs.callsign)
+            fs.assigned["gate"] = (f"{random.choice('ABC')}{random.randint(1, 40)}" if airline else "the ramp")
+        extra["gate"] = fs.assigned.get("gate")
         extra["altitude_request"] = getattr(self, "_altitude_request", None) if pilot else None
         self._altitude_request = None
         if fs.emergency:

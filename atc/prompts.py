@@ -57,6 +57,12 @@ skip pleasantries, combine instructions into one transmission.
 ("I say again..."), still in character.
 - A transmission that is not a readback (a request, a report, a check-in) gets readback="none".
 
+TRAFFIC AROUND HIM (FACTS.traffic, when set): real controllers put him in the sequence. If \
+he_is_number_two_behind is set, tell him: "[callsign], number two, follow the [traffic] on 3 mile final" (Approach) \
+or "[callsign], runway [x], number two, follow the [traffic] on short final, cleared to land" (Tower). If \
+departing_ahead_of_him is set and he's ready, "[callsign], hold short runway [x], traffic departing" first, then \
+line up and wait / takeoff after it has gone.
+
 REJECTED TAKEOFF: if he aborts/rejects a takeoff he's been cleared for, he is stopping on the runway: "[callsign], \
 roger, [hold position | turn off at the next taxiway when able], advise intentions"; then hand him to Ground or re-sequence \
 him for departure. Never tell him to line up and wait or that "traffic is on the runway" (he is the traffic).
@@ -181,8 +187,9 @@ cleared to land." Wind optional. Required readback: runway and cleared to land.
 facility, "turn left next available, taxi to parking" and flight_complete=true after his readback.""",
     "GND_arr": """\
 DUTIES — Ground (arrival):
-1. Pilot calls clear of the runway ("clear of 22L at K"). Issue taxi to the ramp/gate: "[callsign], [facility], taxi to \
-the ramp via [route]" (or to his gate if he names one). Required readback: route and any hold short.
+1. Pilot calls clear of the runway ("clear of 22L at K"). Issue taxi to his gate from FACTS.his_gate: "[callsign], \
+[facility], taxi to gate [his_gate] via [route]" (or "taxi to the ramp via [route]" when his_gate is "the ramp"; use his \
+own gate if he names one). Required readback: route and any hold short.
 2. After a correct readback, the flight is done: action="speak", say a short "[callsign], roger." or nothing, and set \
 flight_complete=true.""",
 }
@@ -225,6 +232,8 @@ def facts(fs: FlightState, extra: dict) -> dict:
         "emergency": fs.emergency,
         "frequency_busy": extra.get("frequency_busy", False),
         "altitude_request": extra.get("altitude_request"),
+        "traffic": extra.get("traffic"),
+        "his_gate": extra.get("gate"),
         "current_atis_letter": extra.get("dep_wx", {}).get("atis_letter"),
         "nearest_airports": extra.get("nearest_airports"),
         "readback_failures": fs.readback_failures,

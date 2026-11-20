@@ -25,6 +25,19 @@ PILOT_VOICES = ["aura-2-apollo-en", "aura-2-aries-en", "aura-2-atlas-en", "aura-
                 "aura-2-janus-en", "aura-2-phoebe-en", "aura-2-draco-en"]
 
 
+# natural pace of each pilot voice (words/min at speed 1.0) and the pace pilots really talk at
+PILOT_WPM = {"aura-2-apollo-en": 112, "aura-2-aries-en": 163, "aura-2-atlas-en": 148, "aura-2-pluto-en": 148,
+             "aura-2-andromeda-en": 193, "aura-2-cora-en": 130, "aura-2-helena-en": 142, "aura-2-juno-en": 153,
+             "aura-2-minerva-en": 132, "aura-2-vesta-en": 96, "aura-2-janus-en": 137, "aura-2-phoebe-en": 187,
+             "aura-2-draco-en": 140}
+PILOT_TARGET_WPM = 185.0
+
+
+def pilot_speed(voice: str, rng: random.Random) -> float:
+    base = PILOT_TARGET_WPM / PILOT_WPM.get(voice, 150) * rng.uniform(0.93, 1.07)
+    return round(max(0.85, min(1.9, base)), 2)
+
+
 @dataclass
 class Line:
     who: str  # "atc" or "pilot"
@@ -77,7 +90,7 @@ def _his_runway_state(fs: FlightState) -> str:
 
 
 def exchange(fs: FlightState, rng: random.Random | None = None, pool: list[str] | None = None,
-             seq: dict | None = None, atis: str | None = None) -> list[Line]:
+             seq: dict | None = None, atis: str | None = None, other_rwy: str | None = None) -> list[Line]:
     """One realistic exchange between the current controller and another aircraft.
 
     `seq` persists across a call: which other aircraft are rolling, so a takeoff clearance only goes
@@ -132,21 +145,32 @@ def exchange(fs: FlightState, rng: random.Random | None = None, pool: list[str] 
     elif k == "TWR":
         state = _his_runway_state(fs)
         departed = seq.setdefault(f"{fac.id}:departed", [])  # others cleared for takeoff, not yet handed off
+        landing_rwy = other_rwy if other_rwy and other_rwy != rwy else None
+        tw_exit = rng.choice(TAXIWAYS)
+
+        def arrival_on(r: str) -> list[Line]:
+            m = rng.choice([4, 5, 6, 8])
+            return [pilot(f"{name}, {cs}, {m} mile final runway {r}."), atc(f"{cs}, {name}, runway {r}, cleared to land.")]
+
+        exiting = [atc(f"{cs}, turn left at {tw_exit}, contact Ground 121.8."), pilot(f"Left at {tw_exit}, Ground, {cs}.")]
         if fac.phase == "arr":
-            mi = rng.choice([5, 6, 8, 10])
+            leader = seq.get(f"{fac.id}:leader")
             if state == "landing":
-                # he's cleared to land: others are sequenced behind him, never cleared onto his runway
-                options += [
-                    [pilot(f"{name}, {cs}, {mi} mile final runway {rwy}."),
-                     atc(f"{cs}, {name}, runway {rwy}, continue, number two, traffic on short final.")],
-                    [pilot(f"{name}, {cs}, {mi} mile final runway {rwy}."),
-                     atc(f"{cs}, {name}, number two, follow the Boeing on 3 mile final, report 3 mile final.")],
-                ]
+                # he's cleared to land: anyone behind him is told to follow, never cleared onto his runway
+                if not seq.get(f"{fac.id}:behind_called"):
+                    options += [[pilot(f"{name}, {cs}, 8 mile final runway {rwy}."),
+                                 atc(f"{cs}, {name}, runway {rwy}, continue, number two, follow the {fs.aircraft_type or 'heavy'} "
+                                     "on 4 mile final.")]]
+                options += [exiting]
             else:
-                options += [
-                    [pilot(f"{name}, {cs}, {mi} mile final runway {rwy}."), atc(f"{cs}, {name}, runway {rwy}, cleared to land.")],
-                    [atc(f"{cs}, turn right next taxiway, contact Ground."), pilot(f"Right next, Ground, {cs}.")],
-                ]
+                if leader and not seq.get(f"{fac.id}:leader_landed"):
+                    # the plane he was told to follow lands just ahead of him
+                    options += [[Line("pilot", f"{name}, {leader}, 3 mile final runway {rwy}.", leader, pv),
+                                 Line("atc", f"{leader}, {name}, runway {rwy}, cleared to land.", leader)]]
+                else:
+                    options += [exiting]
+                    if landing_rwy:
+                        options += [arrival_on(landing_rwy)]
         else:
             on_runway = state in ("lineup", "cleared")
             # someone already cleared and rolling: hand them to departure (frees the runway)
@@ -154,19 +178,20 @@ def exchange(fs: FlightState, rng: random.Random | None = None, pool: list[str] 
                 d = departed[0]
                 options += [[Line("atc", f"{d}, contact Departure. Good day.", d),
                              Line("pilot", f"Departure, {d}, good day.", d, pv)]]
+            if landing_rwy:
+                options += [arrival_on(landing_rwy), exiting]  # the arrival runway keeps working meanwhile
             if not on_runway and not departed:
                 # a departure ahead of him: it called ready, gets cleared, rolls. Never left sitting on the
                 # runway (his own controller doesn't know about chatter planes, so none may block him)
                 options += [[pilot(f"{name}, {cs}, holding short {rwy}, ready."),
                              atc(f"{cs}, {name}, runway {rwy}, cleared for takeoff."),
                              pilot(f"Cleared for takeoff {rwy}, {cs}.")]]
-            if on_runway:
-                # he's on the runway or rolling: others hold short (at most line up behind once he's airborne)
+            if on_runway and not seq.get(f"{fac.id}:next_called"):
+                # only the NEXT plane calls ready while he's on the runway; nobody else is held for him
                 options += [[pilot(f"{name}, {cs}, holding short {rwy}, ready."),
-                             atc(f"{cs}, {name}, hold short runway {rwy}, departure ahead.")]]
+                             atc(f"{cs}, {name}, hold short runway {rwy}, number two for departure.")]]
             if not options:
-                options += [[pilot(f"{name}, {cs}, holding short {rwy}, ready."),
-                             atc(f"{cs}, {name}, hold short runway {rwy}.")]]
+                options += [exiting]
     elif k == "DEP":
         a1, a2 = _alt(rng, 2000, 4000), _alt(rng, 8000, 14000)
         options += [
@@ -211,6 +236,14 @@ def _advance_sequence(fs: FlightState, seq: dict, lines: list[Line]) -> None:
     if fac.kind != "TWR":
         return
     departed = seq.setdefault(f"{fac.id}:departed", [])
+    for ln in lines:
+        t = ln.text.lower()
+        if "number two for departure" in t:
+            seq[f"{fac.id}:next_called"] = True
+        if "continue, number two" in t:
+            seq[f"{fac.id}:behind_called"] = True
+        if ln.who == "atc" and "cleared to land" in t and ln.callsign == seq.get(f"{fac.id}:leader"):
+            seq[f"{fac.id}:leader_landed"] = True
     for ln in lines:
         if ln.who != "atc":
             continue

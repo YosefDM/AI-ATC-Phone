@@ -100,7 +100,8 @@ class CallSession:
         self.chatter_level = settings.chatter_default if settings.chatter_default in CHATTER_CYCLE else "auto"
         self.auto_level = "normal"  # what live traffic says, when chatter_level is "auto"
         self.callsign_pool: list[str] = []
-        self.chatter_seq: dict = {}  # other aircraft's place in the tower sequence (see chatter.exchange)
+        self.chatter_seq: dict = {}
+        self.last_busy_first = 0.0  # other aircraft's place in the tower sequence (see chatter.exchange)
         self.next_traffic_check = 0.0
         self.next_chatter_at = time.time() + random.uniform(8.0, 15.0)
         self.last_atc_to_him = 0.0
@@ -329,6 +330,13 @@ class CallSession:
         if self.rec:
             self.rec.event("pilot", facility=self.fs.facility.name, text=text, stt_s=round(t1 - t0, 2),
                            streamed=live is not None and not live.failed)
+        now = time.time()
+        if (text and self.effective_chatter in ("normal", "busy") and random.random() < 0.2
+                and now - self.last_busy_first > 120 and deepgram.enabled()):
+            # real controllers are sometimes mid-transmission with someone else when you call
+            self.last_busy_first = now
+            await self._play_chatter(single_atc=True)
+        self.ctl.traffic = self.traffic_hint()
         out = Outgoing(self)
         try:
             await self.ctl.pilot(text, out.speak)
@@ -351,6 +359,7 @@ class CallSession:
     async def _handle_event(self, kind: str) -> None:
         if self.rec:
             self.rec.event("timer", type=kind)
+        self.ctl.traffic = self.traffic_hint()
         out = Outgoing(self)
         try:
             await self.ctl.event(kind, out.speak)
@@ -438,15 +447,51 @@ class CallSession:
             return False  # ATC is about to call him; don't crowd it
         return True
 
-    async def _play_chatter(self) -> None:
+    async def _chatter_context(self) -> tuple[str | None, str | None]:
+        """Current ATIS letter, and the airport's other active (landing) runway, for chatter."""
         try:
-            _, wx = await self.ctl.atis_airport()
-            atis = wx.atis_word
+            ap, wx = await self.ctl.atis_airport()
+            fac = self.fs.facility
+            other = None
+            if fac.airport:
+                tap = self.svc.db.get(fac.airport)
+                twx = await get_weather(tap)
+                r = active_runway(tap, twx, "arr" if fac.phase != "arr" else "dep")
+                other = r.ident if r else None
+            return wx.atis_word, other
         except Exception:  # noqa: BLE001
-            atis = None
-        lines = chatter.exchange(self.fs, pool=self.callsign_pool, seq=self.chatter_seq, atis=atis)
-        if self.effective_chatter == "busy" and random.random() < 0.35:
-            lines = lines + chatter.exchange(self.fs, pool=self.callsign_pool, seq=self.chatter_seq, atis=atis)  # back-to-back, like a busy frequency
+            return None, None
+
+    def traffic_hint(self) -> dict | None:
+        """What his controller should know about the chatter traffic around him (sequence, runway)."""
+        fs = self.fs
+        if not fs or self.effective_chatter in ("off", "sparse") or fs.facility.kind not in ("TWR", "APP"):
+            return None
+        fac, seq = fs.facility, self.chatter_seq
+        hint = {}
+        departing = seq.get(f"{fac.id}:departed") or []
+        if departing and fac.kind == "TWR" and fac.phase != "arr":
+            hint["departing_ahead_of_him"] = departing[0]
+        if fac.phase == "arr":
+            key = f"{fac.id}:leader"
+            if key not in seq and self.callsign_pool:
+                leader = random.choice([c for c in self.callsign_pool if c != fs.callsign] or [None])
+                if leader:
+                    seq[key] = leader
+                    if fac.kind == "APP":
+                        seq[f"{fs.next_facility.id if fs.next_facility else fac.id}:leader"] = leader
+            if seq.get(key) and not seq.get(f"{fac.id}:leader_landed"):
+                hint["he_is_number_two_behind"] = f"{seq[key]} (on a 3 mile final ahead of him)"
+        return hint or None
+
+    async def _play_chatter(self, single_atc: bool = False) -> None:
+        atis, other = await self._chatter_context()
+        lines = chatter.exchange(self.fs, pool=self.callsign_pool, seq=self.chatter_seq, atis=atis, other_rwy=other)
+        if single_atc:
+            lines = [ln for ln in lines if ln.who == "atc"][:1]  # just the controller finishing another call
+        elif self.effective_chatter == "busy" and random.random() < 0.35:
+            lines = lines + chatter.exchange(self.fs, pool=self.callsign_pool, seq=self.chatter_seq, atis=atis,
+                                             other_rwy=other)  # back-to-back, like a busy frequency
         self._schedule_chatter()
         if not lines:
             return
@@ -466,7 +511,8 @@ class CallSession:
                     prof, voice = atc_prof, atc_voice
                 else:
                     prof = OTHER_PILOT_PROFILE
-                    voice = Voice(ln.voice or chatter.PILOT_VOICES[0], speed=round(random.uniform(1.05, 1.2), 2))
+                    pv = ln.voice or chatter.PILOT_VOICES[0]
+                    voice = Voice(pv, speed=chatter.pilot_speed(pv, random.Random()))
                 rs = radio.RadioStream(prof)
                 await self.send_audio(radio.to_phone(radio.key_up(prof)), mark=False)
                 async for chunk, rate in self.svc.tts.stream(spoken.speak(ln.text, ln.callsign), voice):

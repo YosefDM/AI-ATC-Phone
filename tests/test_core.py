@@ -178,3 +178,24 @@ def test_required_phrases_in_readback():
     tko = "United 118, runway 22R, fly runway heading, cleared for takeoff."
     assert check(tko, "Let's take off 22 right, United 118.")[1] == []  # recognition's "let's take off" still counts
     assert check(tko, "Cleared for takeoff, United 118.")[1] == ["runway 22 right"]
+
+
+def test_tower_chatter_holds_at_most_one_plane_for_him():
+    import random
+
+    from atc.chatter import exchange
+    from atc.data.airports import get_db
+    from atc.data.weather import _standard
+    from atc.flight import build_plan, start_flight
+
+    db = get_db()
+    dep = db.get("KEWR")
+    fs = start_flight("+1", dep)
+    fs.callsign, fs.aircraft_type = "United 118", "B777"
+    build_plan(fs, db, dep, db.get("KMIA"), _standard("x"), _standard("y"))
+    fs.idx = next(i for i, f in enumerate(fs.facilities) if f.kind == "TWR")
+    fs.add_turn("atc", "United 118, runway 22R, cleared for takeoff.")
+    rng, seq = random.Random(5), {}
+    held = sum("hold short" in ln.text.lower() for _ in range(40) for ln in exchange(fs, rng, seq=seq, other_rwy="22L")
+               if ln.who == "atc")
+    assert held <= 1
