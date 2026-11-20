@@ -84,6 +84,8 @@ class CallSession:
         self.preroll: collections.deque[np.ndarray] = collections.deque(maxlen=max(1, int(settings.preroll_s / 0.02)))
         self.detector = SpeechDetector()
         self.live = None  # streaming STT for the current transmission (see speech/live.py)
+        self.not_transmitting = asyncio.Event()  # ATC never talks while he holds the mic
+        self.not_transmitting.set()
         # he pressed 1 to stop while still mid-word: keep listening until the word ends (or this deadline)
         self.tail_deadline: float | None = None
 
@@ -247,10 +249,19 @@ class CallSession:
 
     async def _start_tx(self) -> None:
         self.offer_resume = None
-        await self.cancel_work()
-        if self.playing:
-            await self.stop_playback()  # keying up steps on whoever was talking
+        if self.playing == "atc":
+            # ATC is already talking: keying up steps on it, so that reply is cut off
+            await self.cancel_work()
+            await self.stop_playback()
+        else:
+            # ATC hasn't started answering his last call yet: don't drop it. It answers once he lets go
+            # (like a real controller waiting for the frequency), then handles this new call.
+            if self.playing:
+                await self.stop_playback()  # chatter / ATIS / prompts just stop
+            if self.work and not self.work.done() and getattr(self.work, "kind", "") != "pilot":
+                await self.cancel_work()  # a timer event or chatter isn't worth keeping
         self.transmitting = True
+        self.not_transmitting.clear()
         self.tx_started = time.monotonic()
         self.tx_frames = list(self.preroll)  # keep the half second before the key press
         self.preroll.clear()
@@ -271,13 +282,21 @@ class CallSession:
         d = self.detector
         if d.heard_speech and d.silence_run_s < TAIL_QUIET_S:
             self.tail_deadline = time.monotonic() + TAIL_MAX_S
+            asyncio.create_task(self._tail_timeout(self.tail_deadline))
             return
         await self._end_tx("key", squelch=False)
+
+    async def _tail_timeout(self, deadline: float) -> None:
+        """End the tail by the clock too, in case no more audio arrives to end it."""
+        await asyncio.sleep(max(0.0, deadline - time.monotonic()) + 0.05)
+        if self.transmitting and self.tail_deadline == deadline:
+            await self._end_tx("key", squelch=False)
 
     async def _end_tx(self, reason: str, squelch: bool = True) -> None:
         if not self.transmitting:
             return
         self.transmitting = False
+        self.not_transmitting.set()
         tailed = self.tail_deadline is not None
         self.tail_deadline = None
         frames = self.tx_frames
@@ -296,7 +315,9 @@ class CallSession:
         if self.ctl:
             self.ctl.touch()
         pcm = np.concatenate(mute_dtmf(frames)) if frames else np.zeros(0, dtype=np.int16)
-        self.work = asyncio.create_task(self._handle_pilot(pcm, live))
+        prev = self.work if self.work and not self.work.done() else None
+        self.work = asyncio.create_task(self._handle_pilot(pcm, live, after=prev))
+        self.work.kind = "pilot"
 
     async def cancel_work(self) -> None:
         if self.work and not self.work.done():
@@ -319,9 +340,14 @@ class CallSession:
             terms.append(dest.spoken_name)
         return terms
 
-    async def _handle_pilot(self, pcm: np.ndarray, live=None) -> None:
+    async def _handle_pilot(self, pcm: np.ndarray, live=None, after: asyncio.Task | None = None) -> None:
         t0 = time.monotonic()
         text = await live.finish() if live else None
+        if after is not None:
+            try:
+                await after  # his previous call is answered first, in order
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                pass
         if text is None:  # no streaming STT, or it failed: transcribe the clip
             terms = self._stt_terms() + ([self.fs.facility.freq] if self.fs else [])
             text = await self.svc.stt.transcribe(pcm, terms)
@@ -685,6 +711,7 @@ class Outgoing:
             fac, sentence = item
             text = spoken.speak(sentence, call.fs.callsign)
             voice = paced(resolve(call.fs.voice_for(fac)), fac.kind) if fac.voice else system_voice()
+            await call.not_transmitting.wait()  # half duplex: wait for him to let go of the mic
             if stream is None:
                 profile = radio.profile_for(fac.id, fac.kind)
                 stream = radio.RadioStream(profile)
