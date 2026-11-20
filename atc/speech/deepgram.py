@@ -133,6 +133,7 @@ class DeepgramTTS:
     async def stream(self, text: str, voice: str, speed: float = 1.0) -> AsyncIterator[np.ndarray]:
         """Yield float32 16 kHz audio chunks as they arrive."""
         params = {"model": voice, "encoding": "linear16", "sample_rate": str(TTS_RATE), "container": "none"}
+        speed = max(0.7, min(1.5, speed))  # the API's allowed range; outside it the request fails outright
         if abs(speed - 1.0) > 0.01:
             params["speed"] = f"{speed:.2f}"
         leftover = b""

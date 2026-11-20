@@ -31,8 +31,8 @@ SPEAKER_RING = [14, 92, 136, 177, 241, 307, 369, 412, 488, 531, 602, 667, 723, 8
 DG_RING = [
     "aura-2-orpheus-en", "aura-2-asteria-en", "aura-2-arcas-en", "aura-2-saturn-en", "aura-2-callista-en",
     "aura-2-neptune-en", "aura-2-zeus-en", "aura-2-thalia-en", "aura-2-hermes-en", "aura-2-athena-en",
-    "aura-2-jupiter-en", "aura-2-odysseus-en", "aura-2-electra-en", "aura-2-orion-en", "aura-2-hera-en",
-    "aura-2-mars-en",
+    "aura-2-jupiter-en", "aura-2-orion-en", "aura-2-hera-en", "aura-2-mars-en",
+    # odysseus and electra were removed: too slow to reach real ATC pace within Deepgram's 1.5x speed limit
 ]
 
 
@@ -62,6 +62,7 @@ VOICE_WPM = {"aura-2-orpheus-en": 213, "aura-2-asteria-en": 156, "aura-2-arcas-e
              "aura-2-electra-en": 131, "aura-2-orion-en": 143, "aura-2-hera-en": 150, "aura-2-mars-en": 156}
 # Real US controllers measure around 170-200+ words per minute (e.g. ~200 at JFK); ICAO's 100 is widely ignored.
 TARGET_WPM = 200.0
+MAX_SPEED = 1.5  # Deepgram rejects anything faster (and anything below 0.7)
 # busy local/radar positions talk a little quicker than a center sector
 KIND_PACE = {"GND": 1.05, "TWR": 1.05, "DEP": 1.05, "APP": 1.05, "CLD": 1.0, "CTR": 0.95}
 
@@ -71,7 +72,7 @@ def paced(v: Voice, kind: str) -> Voice:
     if not v.is_deepgram:
         return v
     wpm = VOICE_WPM.get(v.model, 155)
-    speed = max(0.85, min(1.6, TARGET_WPM / wpm * KIND_PACE.get(kind, 1.0)))
+    speed = max(0.85, min(MAX_SPEED, TARGET_WPM / wpm * KIND_PACE.get(kind, 1.0)))
     return Voice(v.model, v.speaker, v.length_scale, round(speed, 2))
 
 

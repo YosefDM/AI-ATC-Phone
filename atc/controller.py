@@ -383,6 +383,10 @@ class Controller:
         fac = fs.facility
         action = d.get("action", "speak")
         readback = d.get("readback", "none") if pilot else "none"
+        if fac.kind == "CLD" and not fs.clearance_issued and readback != "none":
+            readback = "none"  # nothing has been issued yet, so there's nothing to read back
+            if action == "silent":
+                action = "speak"
         nc = getattr(self, "_number_check", None)
         if pilot and readback == "correct" and nc and nc.get("missing_or_wrong"):
             # the model accepted a readback with numbers missing ("copy that"): ask it again

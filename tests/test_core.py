@@ -199,3 +199,17 @@ def test_tower_chatter_holds_at_most_one_plane_for_him():
     held = sum("hold short" in ln.text.lower() for _ in range(40) for ln in exchange(fs, rng, seq=seq, other_rwy="22L")
                if ln.who == "atc")
     assert held <= 1
+
+
+def test_every_voice_speed_is_within_deepgram_limits():
+    import random
+
+    from atc.chatter import PILOT_VOICES, pilot_speed
+    from atc.speech.tts import DG_RING, KIND_PACE, Voice, paced
+
+    for v in DG_RING:
+        for kind in KIND_PACE:
+            assert 0.7 <= paced(Voice(v), kind).speed <= 1.5
+    for v in PILOT_VOICES:
+        for seed in range(20):
+            assert 0.7 <= pilot_speed(v, random.Random(seed)) <= 1.5

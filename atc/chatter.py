@@ -20,9 +20,9 @@ TAXIWAYS = ["A", "B", "P", "K", "L", "Z", "R", "S", "Y", "W", "J", "C"]
 LETTERS = "ABCDEFGHJKLMNPRSTUVWXYZ"
 
 # Aura-2 voices for the other pilots (none of these are used for controllers).
-PILOT_VOICES = ["aura-2-apollo-en", "aura-2-aries-en", "aura-2-atlas-en", "aura-2-pluto-en", "aura-2-andromeda-en",
-                "aura-2-cora-en", "aura-2-helena-en", "aura-2-juno-en", "aura-2-minerva-en", "aura-2-vesta-en",
-                "aura-2-janus-en", "aura-2-phoebe-en", "aura-2-draco-en"]
+PILOT_VOICES = ["aura-2-aries-en", "aura-2-atlas-en", "aura-2-pluto-en", "aura-2-andromeda-en",
+                "aura-2-cora-en", "aura-2-helena-en", "aura-2-juno-en", "aura-2-minerva-en",
+                "aura-2-janus-en", "aura-2-phoebe-en", "aura-2-draco-en"]  # apollo/vesta: too slow even at 1.5x
 
 
 # natural pace of each pilot voice (words/min at speed 1.0) and the pace pilots really talk at
@@ -35,7 +35,7 @@ PILOT_TARGET_WPM = 185.0
 
 def pilot_speed(voice: str, rng: random.Random) -> float:
     base = PILOT_TARGET_WPM / PILOT_WPM.get(voice, 150) * rng.uniform(0.93, 1.07)
-    return round(max(0.85, min(1.9, base)), 2)
+    return round(max(0.85, min(1.5, base)), 2)
 
 
 @dataclass
