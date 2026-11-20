@@ -9,3 +9,4 @@ data/*.db
 logs/
 data/recordings/
 assets/*.wav
+scratch_*
