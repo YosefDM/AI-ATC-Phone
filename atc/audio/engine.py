@@ -33,7 +33,8 @@ class EngineSound:
         self.zr = sosfilt_zi(self.roar) * 0
         self.air = _sos("bandpass", [350, 900])  # cabin air / slipstream hiss, present whenever moving
         self.za = sosfilt_zi(self.air) * 0
-        self.prop = _sos("bandpass", [300, 2200])
+        # steep: the buzz's 55-100 Hz fundamental is pure rumble on a phone, only its harmonics should pass
+        self.prop = _sos("bandpass", [350, 2200], order=5)
         self.zp = sosfilt_zi(self.prop) * 0
 
     def _spool(self, n: int) -> np.ndarray:
