@@ -7,6 +7,8 @@ Clearance → Ground → Tower → Departure → Center(s) → Approach → Towe
   If you forget the second press, about 2 seconds of silence ends the transmission.
 - `9` plays the ATIS, `0` gives help (which frequency you're on), `7` cycles background traffic
   (off, light or busy), and `*` twice starts a new flight.
+- `8` turns cockpit sounds on or off: engines that follow the flight, cabin chimes, gear and flaps, and
+  "V1, rotate" and landing callouts, all mixed quietly under the radio.
 - `#` opens the phone list (owners only). Add or remove guest callers from the keypad.
 - Every flight departs the home airport (`HOME_AIRPORT`, default KEWR). File by voice with Clearance:
   *"Newark Clearance, United 123, A320, IFR to Boston with information Whiskey."*
