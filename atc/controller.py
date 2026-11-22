@@ -15,6 +15,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
 from .brain import Brain
+from . import fleet
 from .data import procedures, taxi
 from .data.airports import Airport, AirportDB, nm_between
 from .data.weather import Weather, get_weather, prefetch
@@ -26,7 +27,7 @@ from .speech.tts import voice_for_slot
 
 log = logging.getLogger(__name__)
 
-NO_RESPONSE_AFTER_S = 15.0
+NO_RESPONSE_AFTER_S = 20.0
 PROGRESS_DELAY_S = {"RMP_dep": 25.0, "GND_dep": 25.0, "TWR_dep": 18.0, "DEP": 30.0, "CTR": 40.0, "APP": 30.0, "TWR_arr": 22.0}
 MAX_PROGRESS_NUDGES = 5
 
@@ -150,6 +151,10 @@ class Controller:
                         gate = said if said in m.gates else m.gate_for(fs.callsign, random.Random(fs.id))
                     r = await taxi.taxi_out(ap.ident, ap.lat, ap.lon, fs.dep_runway, gate)
                     fs.assigned["taxi_out"] = r.out_phrase() if r else ""
+                    # a big airport at rush hour has a line for the runway (Newark is famous for it)
+                    rng = random.Random(fs.id + "q")
+                    fs.assigned["queue"] = (rng.choice([1, 2, 2, 3, 3, 4, 5, 6]) if ap.kind == "large_airport"
+                                            else rng.choice([1, 1, 2]))
                     fs.assigned["dep_gate"] = gate
                     ramp = any("-RMP-" in f.id for f in fs.facilities)
                     if r and ramp:
@@ -261,6 +266,10 @@ class Controller:
         if key == "TWR_dep":
             if self._said_here(r"cleared for takeoff"):
                 return handoff
+            q = fs.assigned.get("queue", 1)
+            if q > 1 and not fs.assigned.get("monitoring"):
+                return (f"he's waiting at the runway, now number {q} for departure: tell him ('[callsign], number {q}, "
+                        "hold short runway [x]') or, if you already did, say nothing (action=silent).")
             if fs.assigned.get("monitoring") and not self._said_here(r"line up and wait"):
                 return ("he is monitoring your frequency and will not call you: call him first, 'Newark Tower, hello', "
                         "and line him up ('line up and wait').")
@@ -270,11 +279,30 @@ class Controller:
             if climb:
                 alt = f"FL{climb // 100}" if climb >= 18000 else str(climb)
                 return f"climb him: 'climb and maintain {alt}'."
+            if key == "CTR":
+                ch = self._changes()
+                self.procedure_facts()  # makes sure his arrival is picked
+                star = fs.assigned.get("star") or {}
+                fix = procedures.title(star["transition"]) if star.get("transition") else None
+                last = bool(nxt and nxt.kind != "CTR")
+                if ch.get("enroute") == "direct" and fix and not self._said_any(r"\bdirect\b"):
+                    return f"shortcut for him: '[callsign], cleared direct {fix}, rest of route unchanged'."
+                if ch.get("ride") and not self._said_any(r"\bride\b"):
+                    alt = f"FL{fs.cruise_altitude // 100}" if (fs.cruise_altitude or 0) >= 18000 else str(fs.cruise_altitude)
+                    return (f"small talk, like real center controllers: ask for a ride report, '[callsign], how's the "
+                            f"ride at {alt}?' (expects_reply=true); when he answers just 'thanks' or 'roger'.")
+                if last and ch.get("enroute") == "hold" and fix and not self._said_here(r"\bhold\b"):
+                    efc = time.strftime("%H%M", time.gmtime(time.time() + 240))
+                    return (f"arrival traffic into {self.dest.spoken_name if self.dest else 'the airport'} is backed up: "
+                            f"'[callsign], hold {random.choice(['northeast', 'southwest', 'west', 'east'])} of {fix} "
+                            f"as published, expect further clearance {efc}Z'. Required readback: the hold and the time.")
             if key == "CTR" and nxt and nxt.kind != "CTR" and not self._said_here(r"\bdescend"):
                 dest = self.dest
                 arr = (self.procedure_facts() or {}).get("arrival")
+                out_of_hold = "he's holding: clear him out of the hold first ('cleared [arrival] arrival'), then " \
+                    if self._said_here(r"\bhold\b") else ""
                 if arr:
-                    return (f"start his descent on the published arrival: '{arr['descend_via']}, "
+                    return (f"{out_of_hold}start his descent on the published arrival: '{arr['descend_via']}, "
                             f"{dest.spoken_name if dest else ''} altimeter [destination altimeter]'.")
                 cross = min(fs.cruise_altitude or 11000, 11000)
                 return (f"start his descent: 'descend and maintain {cross}, {dest.spoken_name if dest else ''} "
@@ -290,6 +318,39 @@ class Controller:
             return (f"he has landed: give him the runway exit and {handoff}" if nxt
                     else "he has landed: 'turn left next available, taxi to parking', flight_complete=true.")
         return "continue your duties."
+
+    def _changes(self) -> dict:
+        """What will go differently on this flight (decided once, like real life: most flights, nothing)."""
+        fs = self.fs
+        if "changes" not in fs.assigned:
+            rng = random.Random(fs.id + "chg")
+            r = rng.random()
+            fs.assigned["changes"] = {"enroute": "direct" if r < 0.35 else "hold" if r < 0.5 else None,
+                                      "ride": rng.random() < 0.35, "runway": rng.random() < 0.15}
+        return fs.assigned["changes"]
+
+    def _said_any(self, pattern: str) -> bool:
+        return any(t.who == "atc" and re.search(pattern, t.text, re.I) for t in self.fs.history)
+
+    def maybe_runway_change(self) -> str | None:
+        """Now and then Approach switches him to the parallel runway (a real everyday change)."""
+        fs = self.fs
+        if (duty_key(fs.facility) != "APP" or not self._changes().get("runway") or fs.assigned.get("runway_changed")
+                or not self.dest or not fs.arr_runway):
+            return None
+        fs.assigned["runway_changed"] = True
+        m = re.match(r"(\d{1,2})([LR])$", fs.arr_runway)
+        if not m:
+            return None
+        other = m[1] + ("R" if m[2] == "L" else "L")
+        ends = {k.lstrip("0"): v for k, v in procedures.threshold(self.dest.ident).items()}
+        if other not in ends:
+            return None
+        fs.arr_runway = other
+        visual = "visual" in (fs.arr_approach or "")
+        ap = procedures.approach(self.dest.ident, other)
+        fs.arr_approach = f"visual approach runway {other}" if visual or not ap else f"{ap['name']} approach"
+        return f"change of runway for him: 'expect the {fs.arr_approach}' (instead of {m[0]}), for spacing."
 
     def touch(self) -> None:
         self.fs.last_activity = time.time()
@@ -360,10 +421,9 @@ class Controller:
                 if guess and guess.ident != fs.departure:
                     prefetch(guess)
                     fs.destination = guess.ident
-            if not fs.aircraft_type:
-                t = aircraft_type_in(text)
-                if t:
-                    fs.aircraft_type = t
+            t = aircraft_type_in(text)
+            if t:
+                fs.aircraft_type = t  # what he says beats what we assumed from his airline
         number_check = None
         ref = fs.readback_ref or fs.last_atc_text
         if ref and (fs.expects_reply or fs.handoff_pending or fs.pending_readback):
@@ -389,9 +449,21 @@ class Controller:
         fs = self.fs
         if kind == "no_response":
             fs.no_response_count += 1
-            note = "[NO RESPONSE: the pilot has not answered your last transmission for about 15 seconds.]"
+            how = ("Call him the way real controllers do the first time: just his callsign and your facility "
+                   "(\"United 123, Newark Ground\"), or repeat the instruction. Don't say \"how do you hear\"."
+                   if fs.no_response_count == 1 else
+                   "Second try: \"[callsign], [facility], how do you hear?\" or repeat the instruction once more.")
+            note = f"[NO RESPONSE: the pilot has not answered your last transmission for about 20 seconds. {how}]"
         else:
             fs.progress_nudges += 1
+            key = duty_key(fs.facility)
+            q = fs.assigned.get("queue", 1)
+            if key == "TWR_dep" and q > 1 and not self._said_here(r"line up|cleared for take"):
+                # the departure line moves up; while he's just monitoring, Tower has nothing to say to him yet
+                fs.assigned["queue"] = q = max(1, q - random.randint(1, 2))
+                if fs.assigned.get("monitoring") and q > 1:
+                    self.touch()
+                    return
             note = ("[TIME PASSES: a few minutes go by with no transmissions; the flight has progressed. "
                     f"Your next step: {self.progress_hint()}]")
         self.touch()
@@ -408,7 +480,10 @@ class Controller:
         extra["climb_target"] = self.climb_target()
         extra["frequency_busy"] = self.frequency_busy
         extra["traffic"] = self.traffic
+        extra["runway_change"] = self.maybe_runway_change()
         extra["taxi_instruction"] = await self._taxi_instruction()
+        if duty_key(fs.facility) in ("GND_dep", "TWR_dep") and fs.assigned.get("queue", 1) > 1:
+            extra["departure_number"] = fs.assigned["queue"]
         extra["monitor_tower"] = bool(self.dep.override.get("monitor_tower")) and duty_key(fs.facility) == "GND_dep"
         extra["he_is_monitoring"] = bool(fs.assigned.get("monitoring")) and duty_key(fs.facility) == "TWR_dep"
         extra["procedures"] = self.procedure_facts()
@@ -546,7 +621,7 @@ class Controller:
         """An ATC line that asks for something he already gave, or sends him to the frequency he's on."""
         fs, low = self.fs, sentence.lower()
         if not fs.clearance_issued and fs.facility.kind == "CLD":
-            if fs.aircraft_type and re.search(r"\bsay (?:aircraft )?type\b", low):
+            if re.search(r"\bsay (?:aircraft |your )?type\b|\baircraft type\b", low):
                 return f"You already know his aircraft type ({fs.aircraft_type}); don't ask for it."
             if fs.destination and re.search(r"\bsay (?:destination|again destination)\b", low):
                 return f"You already know his destination ({fs.destination}); don't ask for it."
@@ -779,6 +854,8 @@ class Controller:
         fs = self.fs
         if upd.get("callsign") and not fs.callsign:
             fs.callsign = normalize_callsign(upd["callsign"])
+        if fs.callsign and not fs.aircraft_type and not upd.get("aircraft_type"):
+            fs.aircraft_type = fleet.default_type(fs.callsign)  # it's on his filed flight plan: never ask
         if upd.get("aircraft_type"):
             fs.aircraft_type = upd["aircraft_type"].upper().replace(" ", "")
         if upd.get("atis_letter"):

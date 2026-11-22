@@ -67,12 +67,26 @@ MAX_SPEED = 1.5  # Deepgram rejects anything faster (and anything below 0.7)
 KIND_PACE = {"GND": 1.05, "TWR": 1.05, "DEP": 1.05, "APP": 1.05, "CLD": 1.0, "CTR": 0.95}
 
 
+def shift_mood() -> str:
+    """Time of day in New York, which is how the controllers' day is going."""
+    import datetime
+    from zoneinfo import ZoneInfo
+
+    h = datetime.datetime.now(ZoneInfo("America/New_York")).hour
+    if h >= 23 or h < 6:
+        return "late night"
+    if 15 <= h < 20:
+        return "evening rush"
+    return "day"
+
+
 def paced(v: Voice, kind: str) -> Voice:
     """Speed this voice so the controller lands near real ATC pace for his position."""
     if not v.is_deepgram:
         return v
     wpm = VOICE_WPM.get(v.model, 155)
-    speed = max(0.85, min(MAX_SPEED, TARGET_WPM / wpm * KIND_PACE.get(kind, 1.0)))
+    late = 0.94 if shift_mood() == "late night" else 1.0  # end of a long night shift: a touch slower and flatter
+    speed = max(0.85, min(MAX_SPEED, TARGET_WPM / wpm * KIND_PACE.get(kind, 1.0) * late))
     return Voice(v.model, v.speaker, v.length_scale, round(speed, 2))
 
 

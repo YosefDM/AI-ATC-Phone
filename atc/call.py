@@ -30,7 +30,7 @@ from fastapi import WebSocket
 from .audio import radio
 from .audio.codec import FRAME_SAMPLES, PHONE_RATE, resample, to_int16, ulaw_decode, ulaw_encode
 from .audio.detect import SpeechDetector, is_dtmf_frame, mute_dtmf
-from . import chatter, realism
+from . import chatter, fleet, realism
 from .config import settings
 from .director import Director
 from .recorder import CallRecorder
@@ -397,6 +397,22 @@ class CallSession:
             await self.ctl._say(out.speak, "You were blocked, say again.")
             await out.finish()
             return
+        fs = self.fs
+        busy = self.effective_chatter in ("normal", "busy") and not fs.emergency
+        if (busy and text and fs.callsign and not fs.handoff_pending and not fs.pending_readback
+                and not fs.expects_reply and len(text.split()) >= 5 and random.random() < 0.08):
+            # a busy controller makes him wait, works someone else, then comes back to him
+            if self.rec:
+                self.rec.event("stand_by")
+            await self.ctl._say(out.speak, f"{fs.callsign}, stand by.", record=False)
+            await out.finish()
+            await asyncio.sleep(random.uniform(1.0, 2.0))
+            if deepgram.enabled() and self.callsign_pool:
+                await self._play_chatter()
+            await asyncio.sleep(random.uniform(1.5, 4.0))
+            out = Outgoing(self)
+        elif busy and random.random() < 0.35:
+            await asyncio.sleep(random.uniform(0.4, 1.8))  # on a busy frequency the answer isn't instant
         try:
             await self.ctl.pilot(text, out.speak)
         except asyncio.CancelledError:
@@ -541,13 +557,27 @@ class CallSession:
     def traffic_hint(self) -> dict | None:
         """What his controller should know about the chatter traffic around him (sequence, runway)."""
         fs = self.fs
-        if not fs or self.effective_chatter in ("off", "sparse") or fs.facility.kind not in ("TWR", "APP"):
+        if not fs or self.effective_chatter in ("off", "sparse") or fs.facility.kind not in ("GND", "TWR", "APP"):
             return None
         fac, seq = fs.facility, self.chatter_seq
         hint = {}
+        others = [c for c in self.callsign_pool if c != fs.callsign]
+        if fac.kind == "GND" and others:
+            # on the ground he shares the taxiways: "give way to the 737 from your right", "follow the JetBlue"
+            key = f"{fac.id}:ground_traffic"
+            if key not in seq:
+                r = random.random()
+                cs = random.choice(others)
+                seq[key] = ({"give_way_to": f"{cs} ({fleet.type_word(cs)}) crossing from your "
+                                            f"{random.choice(['left', 'right'])}"} if r < 0.3 else
+                            {"follow": f"{cs} ({fleet.type_word(cs)}) ahead of him on the same taxiway"} if r < 0.5 else {})
+            hint.update(seq[key])
         departing = seq.get(f"{fac.id}:departed") or []
         if departing and fac.kind == "TWR" and fac.phase != "arr":
-            hint["departing_ahead_of_him"] = departing[0]
+            ahead = departing[0]
+            hint["departing_ahead_of_him"] = f"{ahead} ({fleet.type_word(ahead)})"
+            if fleet.type_word(ahead).startswith("heavy"):
+                hint["wake_turbulence"] = "caution wake turbulence, departing heavy"
         if fac.phase == "arr":
             key = f"{fac.id}:leader"
             if key not in seq and self.callsign_pool:
@@ -557,7 +587,11 @@ class CallSession:
                     if fac.kind == "APP":
                         seq[f"{fs.next_facility.id if fs.next_facility else fac.id}:leader"] = leader
             if seq.get(key) and not seq.get(f"{fac.id}:leader_landed"):
-                hint["he_is_number_two_behind"] = f"{seq[key]} (on a 3 mile final ahead of him)"
+                lead = seq[key]
+                hint["he_is_number_two_behind"] = f"{lead}, a {fleet.type_word(lead)} (on a 3 mile final ahead of him)"
+                if fac.kind == "APP":
+                    hint["report_traffic"] = (f"traffic 12 o'clock, 6 miles, a {fleet.type_word(lead)} on the "
+                                              "approach ahead of you, report it in sight")
         return hint or None
 
     async def _play_chatter(self, single_atc: bool = False) -> None:
