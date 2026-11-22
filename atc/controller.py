@@ -162,7 +162,8 @@ class Controller:
                         rest = r.steps[len(lanes):]
                         spot = lanes[-1] if lanes else (rest[0] if rest else "")
                         gnd = next((f for f in fs.facilities if f.kind == "GND" and "-RMP-" not in f.id), None)
-                        fs.assigned["ramp_taxi"] = (f"taxi via {', '.join(lanes)}, exit at {spot}, contact Ground "
+                        via = f"taxi via {', '.join(lanes[:-1])}, " if len(lanes) > 1 else ""
+                        fs.assigned["ramp_taxi"] = (f"{via}exit at {spot}, contact Ground "
                                                     f"{gnd.freq if gnd else ''}") if lanes else (
                             f"taxi to {spot}, contact Ground {gnd.freq if gnd else ''}")
                         fs.assigned["spot"] = spot
