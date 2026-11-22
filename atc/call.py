@@ -159,7 +159,8 @@ class CallSession:
         if intro:
             await self.system(
                 f"{dep.spoken_name} airport. You're parked at the gate. Press nine to hear the ATIS. "
-                f"To talk, press one, speak, then press one again. {fac.name} is on {spoken.frequency(fac.freq)}.")
+                f"To talk, press one, speak, then press one again. {fac.name} is on {spoken.frequency(fac.freq)}. "
+                "To start at a different airport, just call that airport's clearance.")
         else:
             await self.system(f"New flight. You're at the gate at {dep.spoken_name}. {fac.name} is on "
                               f"{spoken.frequency(fac.freq)}.")
@@ -357,12 +358,25 @@ class CallSession:
     def _stt_terms(self) -> list[str]:
         fs = self.fs
         terms = [fs.callsign or "", fs.facility.name]
+        if not fs.clearance_issued and not fs.callsign:
+            terms += self._nearby_fields()  # he may be calling another airport's clearance to start there
         if fs.next_facility:
             terms.append(fs.next_facility.name)
         dest = self.svc.db.get(fs.destination) if fs.destination else None
         if dest:
             terms.append(dest.spoken_name)
         return terms
+
+    def _nearby_fields(self) -> list[str]:
+        if not hasattr(self, "_nearby"):
+            from .data.airports import nm_between
+
+            here = self.svc.db.get(self.fs.departure)
+            near = [a for a in self.svc.db.by_ident.values() if a.towered and a.ident != here.ident
+                    and nm_between(here.lat, here.lon, a.lat, a.lon) < 60]
+            near.sort(key=lambda a: nm_between(here.lat, here.lon, a.lat, a.lon))
+            self._nearby = [f"{a.radio_name} Clearance" for a in near[:12]]
+        return self._nearby
 
     async def _handle_pilot(self, pcm: np.ndarray, live=None, after: asyncio.Task | None = None) -> None:
         t0 = time.monotonic()

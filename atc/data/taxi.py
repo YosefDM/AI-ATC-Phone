@@ -57,6 +57,13 @@ def _parse(xml_text: str, keep: dict) -> None:
     for w in root.iter("way"):
         tags = {t.get("k"): t.get("v") for t in w.iter("tag")}
         kind = tags.get("aeroway")
+        if tags.get("name") and (kind in ("apron", "hangar", "terminal") or tags.get("building")
+                                 or tags.get("amenity") or tags.get("operator")):
+            # named places a pilot parks at: FBOs ("Signature", "Atlantic"), terminals, hangars
+            pts = [nodes[nd.get("ref")][:2] for nd in w.iter("nd") if nd.get("ref") in nodes]
+            if pts:
+                keep["places"].setdefault(tags["name"], (sum(p[0] for p in pts) / len(pts),
+                                                         sum(p[1] for p in pts) / len(pts)))
         if kind not in ("taxiway", "taxilane", "runway", "apron", "parking_position"):
             continue
         ids = [nd.get("ref") for nd in w.iter("nd")]
@@ -77,7 +84,7 @@ async def _download(ident: str, lat: float, lon: float, extent: list) -> dict:
     lons = [p[1] for p in extent] + [lon]
     s, n = min(lats) - 0.008, max(lats) + 0.008
     w, e = min(lons) - 0.01, max(lons) + 0.01
-    keep = {"nodes": {}, "ways": {}, "gates": {}}
+    keep = {"v": 2, "nodes": {}, "ways": {}, "gates": {}, "places": {}}
     async with httpx.AsyncClient(timeout=60, headers={"User-Agent": "ai-atc-phone/1.0"}) as c:
         y = s
         while y < n:
@@ -107,7 +114,9 @@ async def get_map(ident: str, lat: float, lon: float) -> "TaxiMap | None":
         for p in (SHIPPED / f"{ident}.json.gz", _cache_dir() / f"{ident}.json.gz"):
             if p.exists():
                 data = json.load(gzip.open(p, "rt"))
-                break
+                if data.get("v") == 2:
+                    break
+                data = None  # an older map without the named places: fetch it again
         if data is None:
             ends = list((threshold(ident) or {}).values())
             try:
@@ -178,6 +187,7 @@ class TaxiMap:
         self.rwy_nodes: dict[str, set[str]] = {}  # runway ref ("4L/22R") -> its nodes
         self.rwy_of: dict[str, str] = {}
         self.aprons: list[tuple[float, float]] = []
+        self.places = {k: tuple(v) for k, v in data.get("places", {}).items()}
         for w in data["ways"].values():
             ids = [i for i in w["n"] if i in self.nodes]
             if w["k"] == "runway" and w["ref"]:
@@ -200,6 +210,17 @@ class TaxiMap:
     def nearest(self, p, among=None) -> str | None:
         pool = among if among is not None else self.adj.keys()
         return min(pool, key=lambda i: _m(self.nodes[i], p), default=None)
+
+    def place(self, said: str | None):
+        """'at Signature' / 'Atlantic ramp' -> where that is on the airport (None if no match)."""
+        words = [w for w in re.findall(r"[a-z]+", (said or "").lower())
+                 if w not in ("at", "the", "ramp", "fbo", "parked", "gate", "aviation", "jet")]
+        if not words:
+            return None
+        best = max(self.places.items(), key=lambda kv: sum(w in kv[0].lower() for w in words), default=None)
+        if best and sum(w in best[0].lower() for w in words):
+            return best[1]
+        return None
 
     def runway_ref(self, rwy: str) -> str | None:
         r = _norm_rwy(rwy)
@@ -336,11 +357,12 @@ class TaxiMap:
         return r
 
 
-async def taxi_out(ident: str, lat: float, lon: float, runway: str, gate: str | None) -> Route | None:
+async def taxi_out(ident: str, lat: float, lon: float, runway: str, gate: str | None,
+                   parking: str | None = None) -> Route | None:
     m = await get_map(ident, lat, lon)
     if not m or not runway:
         return None
-    pos = m.gates.get(gate) if gate else None
+    pos = m.gates.get(gate) if gate else m.place(parking)
     if pos is None:
         pos = random.choice(m.aprons) if m.aprons else (lat, lon)
     r = m.out_route(pos, runway)

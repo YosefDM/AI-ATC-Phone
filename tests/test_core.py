@@ -286,3 +286,20 @@ def test_controller_slips_always_end_on_the_right_value():
             assert out.endswith(s[s.rfind(" ") + 1:])  # nothing after the slip changes
     assert "United 85 Heavy" in realism.humanize("United 85, roger.", "United 85", "B77W", slips=False)
     assert "one eight seven" in spoken.speak(realism.humanize("Tower 18.7, good day.", None, None, slips=False))
+
+
+def test_first_call_picks_the_departure_airport():
+    from atc.controller import Controller
+    from atc.data.airports import get_db
+    from atc.flight import start_flight
+
+    db = get_db()
+    fs = start_flight("t", db.get("KEWR"))
+    c = Controller(fs, db)
+    assert c._maybe_move_departure("teterboro clearance, n123ab, at atlantic, ifr to boston.")
+    assert fs.departure == "KTEB" and fs.facility.name == "Teterboro Clearance"
+    fs = start_flight("t", db.get("KEWR"))
+    c = Controller(fs, db)
+    assert not c._maybe_move_departure("newark clearance, united 5, ifr to chicago.")
+    assert not c._maybe_move_departure("blorpville clearance, united 5, ifr to chicago.")
+    assert fs.departure == "KEWR"

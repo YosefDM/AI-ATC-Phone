@@ -73,6 +73,37 @@ class Controller:
 
     # ------------------------------------------------------------ context
 
+    def _maybe_move_departure(self, low: str) -> bool:
+        """His first call names the airport he's at ("Teterboro Clearance, N123AB, at Signature..."):
+        the flight starts there, like a real pilot who simply calls that airport's controller."""
+        fs = self.fs
+        if fs.clearance_issued or fs.idx != 0 or any(t.who == "atc" for t in fs.history):
+            return False
+        m = re.match(r"\W*(?:hello,?\s+|hi,?\s+|good \w+,?\s+)?([a-z][a-z' .-]{1,40}?)\s+"
+                     r"(?:clearance|delivery|ground|tower|ramp)\b", low)
+        if not m:
+            return False
+        name = m.group(1).strip(" .")
+        here = self.dep
+        if name in (here.radio_name.lower(), here.spoken_name.lower(), here.ident.lower()):
+            return False
+        ap = self.db.search(name, near=(here.lat, here.lon))
+        if not ap or ap.ident == here.ident or not ap.towered:
+            return False
+        hay = f"{ap.name} {ap.municipality} {ap.radio_name} {ap.ident}".lower()
+        if not all(w in hay for w in re.findall(r"[a-z]+", name)):
+            return False  # only a clear match: a misheard word shouldn't fly him out of the wrong airport
+        from .flight import departure_facilities
+
+        voices = [f.voice for f in fs.facilities]
+        fs.departure = ap.ident
+        fs.facilities = departure_facilities(ap)
+        for f, v in zip(fs.facilities, voices):
+            f.voice = v
+        prefetch(ap)
+        taxi.prefetch_map(ap.ident, ap.lat, ap.lon)
+        return True
+
     @property
     def dep(self) -> Airport:
         return self.db.get(self.fs.departure)
@@ -149,7 +180,7 @@ class Controller:
                     if airline:
                         said = (fs.parking or "").upper().replace("GATE", "").strip()
                         gate = said if said in m.gates else m.gate_for(fs.callsign, random.Random(fs.id))
-                    r = await taxi.taxi_out(ap.ident, ap.lat, ap.lon, fs.dep_runway, gate)
+                    r = await taxi.taxi_out(ap.ident, ap.lat, ap.lon, fs.dep_runway, gate, fs.parking)
                     fs.assigned["taxi_out"] = r.out_phrase() if r else ""
                     # a big airport at rush hour has a line for the runway (Newark is famous for it)
                     rng = random.Random(fs.id + "q")
@@ -368,6 +399,9 @@ class Controller:
             cs = fs.callsign
             await self._say(speak, f"{cs}, say again." if cs else f"Station calling {fs.facility.name}, say again.", record=False)
             return
+
+        if self._maybe_move_departure(low):
+            log.info("flight moved: departing %s", fs.departure)
 
         # routing: after a handoff, a check-in addressed to the next facility goes straight there
         nxt = fs.next_facility
