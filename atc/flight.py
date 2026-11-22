@@ -60,6 +60,7 @@ class FlightState:
     atis_reported: str | None = None
     requested_altitude: int | None = None
     parking: str | None = None
+    rules: str = "IFR"  # "VFR" when he calls VFR: flight following, no instrument clearance
 
     # computed by code
     squawk: str | None = None
@@ -190,6 +191,26 @@ def cruise_altitude(dist_nm: float, course: float, klass: str, requested: int | 
     return _legal(min(target, caps[klass]), east)
 
 
+# Class B primary airports: a VFR departure needs "cleared out of the Class Bravo airspace"
+CLASS_B = {"KATL", "KBOS", "KBWI", "KCLT", "KCVG", "KDCA", "KDEN", "KDFW", "KDTW", "KEWR", "KHNL", "KIAD", "KIAH",
+           "KJFK", "KLAS", "KLAX", "KLGA", "KMCI", "KMCO", "KMEM", "KMIA", "KMSP", "KMSY", "KNKX", "KORD", "KPHL",
+           "KPHX", "KPIT", "KSAN", "KSEA", "KSFO", "KSLC", "KSTL", "KTPA", "KADW", "KHOU", "KMDW"}
+SPEEDS = {"piston": {"cruise": 115, "approach": 90, "max_assignable": 120},
+          "turboprop": {"cruise": 270, "approach": 130, "max_assignable": 250},
+          "jet": {"cruise": 450, "approach": 140, "max_assignable": 250}}
+
+
+def vfr_altitude(dist_nm: float, course: float, klass: str, requested: int | None) -> int:
+    """VFR cruising altitudes: odd thousands + 500 eastbound, even + 500 westbound (below 18,000)."""
+    east = course < 180
+    want = requested or (3500 if dist_nm < 40 else 5500 if dist_nm < 120 else 7500)
+    want = min(want, 9500 if klass == "piston" else 17500)
+    thousands = max(3, int(want // 1000))
+    if (thousands % 2 == 1) != east:
+        thousands = thousands - 1 if thousands > 3 else thousands + 1
+    return thousands * 1000 + 500
+
+
 def new_squawk() -> str:
     while True:
         code = f"{random.randint(1, 6)}{random.randint(0, 7)}{random.randint(0, 7)}{random.randint(0, 7)}"
@@ -240,7 +261,8 @@ def build_plan(fs: FlightState, db: AirportDB, dep: Airport, dest: Airport, dep_
     course = bearing(dep.lat, dep.lon, dest.lat, dest.lon)
     klass = aircraft_class(fs.aircraft_type)
     fs.route_nm = round(dist)
-    fs.cruise_altitude = cruise_altitude(dist, course, klass, fs.requested_altitude)
+    fs.cruise_altitude = (vfr_altitude(dist, course, klass, fs.requested_altitude) if fs.rules == "VFR"
+                          else cruise_altitude(dist, course, klass, fs.requested_altitude))
     init = dep.override.get("initial_altitude", 3000 if klass == "piston" else 5000)
     fs.initial_altitude = min(init, fs.cruise_altitude)
     fs.squawk = fs.squawk or new_squawk()

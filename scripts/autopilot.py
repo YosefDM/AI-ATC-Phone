@@ -38,7 +38,7 @@ async def main(a) -> None:
     ctl = Controller(fs, db)
     client = AsyncOpenAI(api_key=settings.openai_api_key)
     ap, wx = await ctl.atis_airport()
-    sysmsg = PILOT.format(cs=a.callsign, typ=a.type, dep=fs.departure, dest=a.dest, atis=wx.atis_word,
+    sysmsg = ("You are flying VFR with flight following (by sight, not on an instrument plan). " if a.vfr else "") + PILOT.format(cs=a.callsign, typ=a.type, dep=fs.departure, dest=a.dest, atis=wx.atis_word,
                           mistakes=("Make a wrong readback (wrong number) about once every 4 readbacks, then correct it "
                                     "when ATC corrects you." if a.mistakes else "") + " " + a.scenario)
     convo = [{"role": "system", "content": sysmsg}]
@@ -48,7 +48,8 @@ async def main(a) -> None:
         heard.append(f"{fac.name}: {text}")
         print(f"   ATC  {fac.name:<22} {text}")
 
-    first = f"{fs.facility.name}, {a.callsign}, {a.type}, IFR to {a.dest} with information {wx.atis_word}"
+    rules = "VFR" if a.vfr else "IFR"
+    first = f"{fs.facility.name}, {a.callsign}, {a.type}, {rules} to {a.dest} with information {wx.atis_word}"
     pilot_line = first
     lat = []
     for step in range(60):
@@ -88,4 +89,5 @@ if __name__ == "__main__":
     p.add_argument("callsign")
     p.add_argument("--mistakes", action="store_true")
     p.add_argument("--scenario", default="", help="extra instructions for the pilot, e.g. an emergency to declare")
+    p.add_argument("--vfr", action="store_true", help="fly VFR with flight following")
     asyncio.run(main(p.parse_args()))

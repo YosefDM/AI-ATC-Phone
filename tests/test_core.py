@@ -303,3 +303,12 @@ def test_first_call_picks_the_departure_airport():
     assert not c._maybe_move_departure("newark clearance, united 5, ifr to chicago.")
     assert not c._maybe_move_departure("blorpville clearance, united 5, ifr to chicago.")
     assert fs.departure == "KEWR"
+
+
+def test_vfr_altitudes_and_speeds():
+    from atc.flight import SPEEDS, vfr_altitude
+
+    assert vfr_altitude(50, 90, "piston", None) % 2000 == 1500  # eastbound: odd thousands + 500
+    assert vfr_altitude(50, 270, "piston", None) % 2000 == 500  # westbound: even thousands + 500
+    assert vfr_altitude(500, 90, "piston", 15000) <= 9500
+    assert SPEEDS["piston"]["max_assignable"] < 170

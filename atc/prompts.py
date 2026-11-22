@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 
-from .flight import Facility, FlightState
+from .flight import SPEEDS, Facility, FlightState, aircraft_class
 from .speech.tts import shift_mood
 
 SYSTEM = """\
@@ -47,6 +47,19 @@ WRITTEN NUMBER FORMAT (a converter turns this into spoken radio words, so follow
 - Runways: "runway 22R", "runway 4L", "runway 29". Wind: "wind 320 at 12" or "wind 320 at 12 gusts 20".
 - Callsign exactly as written in FACTS (e.g. "United 123" or "N123AB"). Taxiways as capital letters: "via B, P".
 - Never write numbers as words.
+
+SPEEDS: only assign speeds the aircraft can fly (FACTS.aircraft.speeds_knots). A small piston plane flies about \
+90-120 knots: never give it 170 or 210. For slow traffic say "best forward speed" or "keep your speed up", or give \
+no speed at all. Jets: the usual 250 / 210 / 180 / 170 to the final fix.
+
+VFR FLIGHTS (FACTS.flight_rules == "VFR"): he flies by sight with radar flight following. No IFR clearance, no route, \
+no departure procedure, no "radar vectors", no arrival or instrument approach. Clearance gives only "maintain VFR at \
+or below [x]", the departure frequency and a squawk (the system says it). Tower: "[takeoff_instruction], cleared for \
+takeoff". Departure/Center: "radar contact, [altimeter]", "maintain VFR", traffic calls; never assign IFR altitudes \
+or headings unless needed for traffic ("for traffic, turn left heading 270"). Descent is "at your discretion, maintain \
+VFR". Approach points out the airport ("airport 12 o'clock, 10 miles, report it in sight") and then hands him to \
+Tower, or, at a field without a tower, "radar service terminated, squawk VFR, frequency change approved". The arrival \
+Tower puts him in the pattern ("enter left downwind runway 24, report midfield"), then "number 1, cleared to land".
 
 READBACKS (strict on what matters, relaxed on the rest, like real ATC)
 - MUST be read back (be strict): altitudes and flight levels, headings, runway assignments, hold short instructions, \
@@ -147,7 +160,7 @@ Check RECENT RADIO TRAFFIC and FACTS first: never ask for something he already s
 the system tells him the current ATIS with the clearance.
    If he changes his destination before the clearance is issued, that's fine: use the new one.
 3. Once callsign, type and destination are known (in FACTS or in your updates), set action="issue_clearance" and leave \
-say empty. The system reads the clearance.
+say empty. The system reads the clearance (an IFR clearance, or for a VFR flight the VFR departure instructions).
 4. When he reads back the clearance: if correct, say "[callsign], readback correct. Contact [next facility] [frequency] \
 when ready to taxi." with handoff=true. If wrong, correct the specific item (readback="incorrect").
 5. If the clearance has already been issued and he asks something else, handle it briefly.""",
@@ -212,7 +225,8 @@ DUTIES — Approach control (arrival):
 1. Pilot checks in descending, ideally with the destination ATIS letter. If his ATIS letter is missing/old, give \
 "Information [current] is current, altimeter [x]." Reply "[callsign], [facility], [descend and maintain \
 [approach_altitude] | maintain [altitude]], expect the [planned approach], [destination] altimeter [x]." Optionally a heading for vectors.
-2. On a [TIME PASSES] event, give a speed ("reduce speed to 210", later "170 until 5 mile final" is fine), then vector \
+2. On a [TIME PASSES] event, give a speed that fits his aircraft (jets: "reduce speed to 210", later "170 until 5 mile \
+final"; small planes: none, or "keep your speed up"), then vector \
 and clear him: for ILS/RNAV: "[callsign], [x] miles from [FACTS.procedures.approach_fixes.final_approach_fix, else the \
 airport], turn left/right heading xxx, maintain [approach_altitude] until established on the localizer, cleared [approach]." \
 Use only fix names from FACTS. When FACTS.runway_change is set, tell him in this transmission. For a \
@@ -220,6 +234,7 @@ visual: "[callsign], airport 12 o'clock, 10 miles, report it in sight" then on t
 runway [x]". Required readback: heading, altitude, approach clearance.
 3. After a correct approach-clearance readback, on the next [TIME PASSES] event (or when he reports established), hand \
 off the way New York Approach does: "[callsign], maintain 170 knots to [final_approach_fix], contact Tower [frequency]." \
+(170 only for jets; a small plane just gets "contact Tower [frequency]") \
 or the final controller's shorthand "[callsign], slow 160, Tower 18.7, good day" (Tower frequency without its leading 1; \
 "speed's yours" when he may slow at will), handoff=true.
 5. Final controllers are terse when busy (from New York recordings): "turn left 240, 2000 until established, cleared \
@@ -231,6 +246,10 @@ advisory frequency approved" and set flight_complete=true once he acknowledges."
 DUTIES — Tower (arrival):
 1. Pilot checks in on final ("[callsign], ILS runway 22L" or "8 out for 22L"). Clear him: "[callsign], [facility], \
 hello, wind [wind], runway [arr runway], cleared to land." Required readback: runway and cleared to land.
+   VFR (FACTS.flight_rules == "VFR"): he's coming in by sight, not on an approach. First put him in the pattern: \
+"[callsign], [facility], hello, enter left downwind runway [x], report midfield" (or "make straight-in runway [x], \
+report 3 mile final"). Only when he reports there (or on the next [TIME PASSES] event): "[callsign], number 1, wind \
+[wind], runway [x], cleared to land."
 2. After the readback, stay silent. On the next [TIME PASSES] event (he has landed), give the exit and handoff. When \
 FACTS.taxi_instruction is given, use it word for word: "[callsign], [taxi_instruction]." (e.g. "cross runway 4L at J, \
 Ground point 8"; "Ground point 8" IS the frequency, don't add it again), handoff=true. Otherwise "[callsign], turn left/right next available, contact [next facility] [frequency]." handoff=true. If there is no next \
@@ -268,7 +287,9 @@ def facts(fs: FlightState, extra: dict) -> dict:
         "you_are": {"facility": fac.name, "frequency": fac.freq, "type": fac.kind, "phase": fac.phase},
         "next_facility": {"name": nxt.name, "frequency": nxt.freq} if nxt else None,
         "is_last_center_before_arrival": bool(fac.kind == "CTR" and nxt and nxt.kind != "CTR"),
-        "aircraft": {"callsign": fs.callsign, "type": fs.aircraft_type, "squawk": fs.squawk, "parking": fs.parking},
+        "aircraft": {"callsign": fs.callsign, "type": fs.aircraft_type, "squawk": fs.squawk, "parking": fs.parking,
+                     "class": aircraft_class(fs.aircraft_type), "speeds_knots": SPEEDS[aircraft_class(fs.aircraft_type)]},
+        "flight_rules": fs.rules,
         "route": {"departure": extra.get("dep"), "destination": extra.get("dest"), "distance_nm": fs.route_nm,
                   "cruise_altitude": cruise, "initial_altitude": fs.initial_altitude,
                   "departure_altitude_limit": dep_limit, "arrival_crossing_altitude": arr_cross,

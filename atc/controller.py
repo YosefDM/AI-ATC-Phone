@@ -134,7 +134,16 @@ class Controller:
         key = duty_key(fs.facility)
         out: dict = {}
         sid = fs.assigned.get("sid")
-        if key == "TWR_dep" and fs.dep_runway:
+        if key == "TWR_dep" and fs.dep_runway and fs.rules == "VFR" and self.dest:
+            from .data.airports import bearing
+
+            m = re.match(r"(\d{1,2})", fs.dep_runway)
+            rwy_hdg = int(m.group(1)) * 10 if m else 0
+            turn = (bearing(self.dep.lat, self.dep.lon, self.dest.lat, self.dest.lon) - rwy_hdg + 360) % 360
+            out["takeoff_instruction"] = ("straight out departure approved" if turn < 30 or turn > 330 else
+                                          "right turn on course approved" if turn <= 180 else
+                                          "left turn on course approved")
+        elif key == "TWR_dep" and fs.dep_runway:
             if sid and sid.get("rnav") and sid.get("first_fix"):
                 out["takeoff_instruction"] = f"RNAV to {procedures.title(sid['first_fix'])}"
             else:
@@ -144,7 +153,7 @@ class Controller:
             fix = sid.get("transition") or sid.get("first_fix")
             if fix:
                 out["proceed_direct_fix"] = procedures.title(fix)
-        if key in ("CTR", "APP") and self.dest:
+        if key in ("CTR", "APP") and self.dest and fs.rules != "VFR":
             star = fs.assigned.get("star")
             if star is None:
                 star = procedures.arrival(self.dest.ident, fs.arr_runway, (self.dep.lat, self.dep.lon)) or {}
@@ -156,7 +165,8 @@ class Controller:
                                   "crossing_restriction": (f"cross {procedures.title(cross[0])} at "
                                                            f"{'or above ' if cross[1] == '+' else 'or below ' if cross[1] == '-' else ''}"
                                                            f"{cross[2]}") if cross else None}
-        if key == "APP" and self.dest and fs.arr_runway and fs.arr_approach and "visual" not in fs.arr_approach:
+        if (key == "APP" and self.dest and fs.arr_runway and fs.arr_approach and "visual" not in fs.arr_approach
+                and fs.rules != "VFR"):
             ap = procedures.approach(self.dest.ident, fs.arr_runway)
             if ap:
                 out["approach_fixes"] = {"final_approach_fix": procedures.title(ap["faf"]) if ap.get("faf") else None,
@@ -272,7 +282,7 @@ class Controller:
     def climb_target(self) -> int | None:
         """Altitude this facility should be climbing him to, if any."""
         fs = self.fs
-        if not fs.planned or not fs.cruise_altitude or fs.emergency:
+        if not fs.planned or not fs.cruise_altitude or fs.emergency or fs.rules == "VFR":
             return None
         cur = fs.assigned.get("altitude") or fs.initial_altitude or 0
         fac, nxt = fs.facility, fs.next_facility
@@ -305,6 +315,10 @@ class Controller:
                 return ("he is monitoring your frequency and will not call you: call him first, 'Newark Tower, hello', "
                         "and line him up ('line up and wait').")
             return "clear him for takeoff (with the wind)."
+        if fs.rules == "VFR":
+            vfr = self._vfr_hint(key, handoff)
+            if vfr:
+                return vfr
         if key in ("DEP", "CTR"):
             climb = self.climb_target()
             if climb:
@@ -350,13 +364,41 @@ class Controller:
                     else "he has landed: 'turn left next available, taxi to parking', flight_complete=true.")
         return "continue your duties."
 
+    def _vfr_hint(self, key: str, handoff: str) -> str | None:
+        """VFR flight following: radar advisories, no routes, his own altitude, a pattern at the end."""
+        fs, dest, nxt = self.fs, self.dest, self.fs.next_facility
+        name = dest.spoken_name if dest else "the airport"
+        if key == "DEP" and not self._said_here(r"\bmaintain vfr\b|resume own"):
+            return (f"he's VFR with flight following: 'radar contact, [altimeter], climb VFR at your discretion' "
+                    f"(cruise {fs.cruise_altitude}), 'maintain VFR'.")
+        if key == "CTR" and nxt and nxt.kind != "CTR" and not self._said_here(r"\bdescen"):
+            return f"'{name} altimeter [x], descent at your discretion, maintain VFR'."
+        if key == "APP":
+            if not self._said_here(r"in sight|field in sight|airport.*o'clock"):
+                return f"point out {name}: '[callsign], {name} airport 12 o'clock, 10 miles, report it in sight'."
+            said = [t.text.lower() for t in fs.history[-4:] if t.who == "pilot"]
+            if not any(re.search(r"in sight|have (the )?(field|airport)|got it", x) and "will report" not in x
+                       and "wilco" not in x for x in said):
+                return "he hasn't reported the airport in sight yet: wait (action=silent) or ask 'report the airport in sight'."
+            if nxt and nxt.kind == "TWR":
+                return f"he has it in sight: 'contact {nxt.name} {nxt.freq}' (handoff=true)."
+            return ("'radar service terminated, squawk VFR, change to advisory frequency approved' and "
+                    "flight_complete=true.")
+        if key == "TWR_arr" and not self._said_here(r"cleared to land"):
+            if not self._said_here(r"downwind|base|straight.in"):
+                side = random.choice(["left", "right"])
+                return f"pattern entry: '[callsign], enter {side} downwind runway {fs.arr_runway}, report midfield'."
+            return "he's in the pattern: '[callsign], number 1, runway [x], cleared to land' (with the wind)."
+        return None
+
     def _changes(self) -> dict:
         """What will go differently on this flight (decided once, like real life: most flights, nothing)."""
         fs = self.fs
         if "changes" not in fs.assigned:
             rng = random.Random(fs.id + "chg")
             r = rng.random()
-            fs.assigned["changes"] = {"enroute": "direct" if r < 0.35 else "hold" if r < 0.5 else None,
+            ifr = fs.rules != "VFR"  # VFR traffic doesn't get shortcuts or holds
+            fs.assigned["changes"] = {"enroute": ("direct" if r < 0.35 else "hold" if r < 0.5 else None) if ifr else None,
                                       "ride": rng.random() < 0.35, "runway": rng.random() < 0.15}
         return fs.assigned["changes"]
 
@@ -458,6 +500,10 @@ class Controller:
             t = aircraft_type_in(text)
             if t:
                 fs.aircraft_type = t  # what he says beats what we assumed from his airline
+            if re.search(r"\bv\.? ?f\.? ?r\b", low) and not re.search(r"\bi\.? ?f\.? ?r\b", low):
+                fs.rules = "VFR"
+            elif re.search(r"\bi\.? ?f\.? ?r\b", low):
+                fs.rules = "IFR"
         number_check = None
         ref = fs.readback_ref or fs.last_atc_text
         if ref and (fs.expects_reply or fs.handoff_pending or fs.pending_readback):
@@ -926,6 +972,8 @@ class Controller:
         dep_fac = next((f for f in fs.facilities if f.kind in ("DEP", "CTR")), None)
         cruise = fs.cruise_altitude
         cruise_s = f"FL{cruise // 100}" if cruise >= 18000 else f"{cruise}"
+        if fs.rules == "VFR":
+            return self._vfr_clearance(cs, dep, dest, dep_fac)
         sid = None
         if aircraft_class(fs.aircraft_type) != "piston" and fs.dep_runway:
             sid = procedures.departure(dep.ident, fs.dep_runway, (dep.lat, dep.lon), (dest.lat, dest.lon))
@@ -948,6 +996,31 @@ class Controller:
                                f"departure frequency {dep_fac.freq if dep_fac else ''}", f"squawk {fs.squawk}"]
         fs.expects_reply = True
         fs.assigned["altitude"] = fs.initial_altitude
+        return text
+
+    def _vfr_clearance(self, cs: str, dep, dest, dep_fac) -> str:
+        """VFR with flight following: no route, just an altitude limit, a squawk and Departure's frequency.
+        At a Class B airport it's "cleared out of the Class Bravo airspace" (as heard at Newark)."""
+        from .data.airports import bearing
+        from .flight import CLASS_B
+
+        fs = self.fs
+        course = bearing(dep.lat, dep.lon, dest.lat, dest.lon)
+        way = ["north", "northeast", "east", "southeast", "south", "southwest", "west", "northwest"][
+            int((course + 22.5) // 45) % 8]
+        limit = fs.initial_altitude or 2500
+        freq = dep_fac.freq if dep_fac else "124.7"
+        if dep.ident in CLASS_B:
+            text = (f"{cs}, cleared out of the Class Bravo airspace to the {way}, maintain VFR at or below {limit}, "
+                    f"departure frequency {freq}, squawk {fs.squawk}.")
+            items = ["cleared out of the Class Bravo", f"at or below {limit}"]
+        else:
+            text = f"{cs}, maintain VFR at or below {limit}, departure frequency {freq}, squawk {fs.squawk}."
+            items = [f"at or below {limit}"]
+        fs.clearance_issued = True
+        fs.pending_readback = items + [f"departure frequency {freq}", f"squawk {fs.squawk}"]
+        fs.expects_reply = True
+        fs.assigned["altitude"] = limit
         return text
 
     async def _say(self, speak: Speak, text: str, record: bool = True) -> None:
