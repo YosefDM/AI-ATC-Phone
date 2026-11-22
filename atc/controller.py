@@ -215,6 +215,15 @@ class Controller:
             fs.expects_reply = bool(fs.pending_readback)
             return
 
+        if (fs.clearance_issued and fs.facility.kind == "GND" and fs.facility.phase == "dep" and self.dest
+                and re.search(r"\brequest\w*\s+(?:(?:an?|my|the|ifr)\s+)*clearance\b|\bclearance to\b", low)):
+            # asking Ground for the clearance he already has: remind him, don't invent a new one
+            fs.add_turn("pilot", text)
+            fs.expects_reply = True
+            await self._say(speak, f"{fs.callsign}, {fs.facility.name}, you're already cleared to "
+                                   f"{self.dest.spoken_name}, squawk {fs.squawk}. Advise ready to taxi.")
+            return
+
         if not fs.clearance_issued:
             # take what he already said ourselves, so Clearance never asks for it again
             m = re.search(r"\bto\s+([a-z' .]{2,40}?)(?=\s+(?:with|information|request|we|at|type|united|delta)\b|[,.]|$)", low)
@@ -224,6 +233,12 @@ class Controller:
                     prefetch(guess)
                     if not fs.destination and guess.ident != fs.departure:
                         fs.destination = guess.ident
+            if not fs.destination and re.search(r"destination", fs.last_atc_text or "", re.I):
+                # he was asked for it: the whole answer is the destination ("White Plains airport.")
+                guess = self._resolve_destination(re.sub(r"\b(airport|international|please|it's|its)\b", "", low).strip(" ,."))
+                if guess and guess.ident != fs.departure:
+                    prefetch(guess)
+                    fs.destination = guess.ident
             if not fs.aircraft_type:
                 t = aircraft_type_in(text)
                 if t:
@@ -288,10 +303,30 @@ class Controller:
 
         async def on_sentence(s: str) -> None:
             if state["mode"] == "speak":
+                why = self._pointless(s, event_text if pilot else "")
+                if why:
+                    log.info("blocked ATC line %r: %s", s, why)
+                    if not state["spoken"]:
+                        # nothing said yet: ask the model again (below) with the reason spelled out
+                        state["mode"], state["blocked"] = "blocked", why
+                    return  # otherwise just leave that sentence out
                 state["spoken"].append(s)
                 await speak(fac, s)
 
         result = await self.brain.respond(messages, on_decision, on_sentence)
+        if state["mode"] == "blocked":
+            why = state["blocked"]
+            if fac.kind == "CLD" and not fs.clearance_issued:
+                # he has given what Clearance needs: code issues it (or asks for the one thing still missing)
+                self._apply_updates(result.get("updates") or {})
+                state = {"mode": "clearance", "spoken": [], "handoff": False}
+            else:
+                state = {"mode": "speak", "spoken": [], "handoff": False, "rechecked": True}
+                messages[-1]["content"] += f"\n\n{why} Answer him properly; action must be \"speak\"."
+                result = await self.brain.respond(messages, on_decision, on_sentence)
+                if state["mode"] == "blocked":
+                    state = {"mode": "speak", "spoken": [], "handoff": False}
+                    result = {"say": f"{fs.callsign}, {fac.name}." if fs.callsign else ""}
         rb = result.get("readback", "none")
         if pilot and state["mode"] == "silent" and not state.get("advanced") and (
                 rb == "incorrect" or state.get("recheck") or state.get("recheck_ok") or state.get("recheck_action")
@@ -377,6 +412,25 @@ class Controller:
             fs.add_turn("atc", full)
             fs.last_atc_text = full
         self.touch()
+
+    def _pointless(self, sentence: str, pilot_text: str) -> str | None:
+        """An ATC line that asks for something he already gave, or sends him to the frequency he's on."""
+        fs, low = self.fs, sentence.lower()
+        if not fs.clearance_issued and fs.facility.kind == "CLD":
+            if fs.aircraft_type and re.search(r"\bsay (?:aircraft )?type\b", low):
+                return f"You already know his aircraft type ({fs.aircraft_type}); don't ask for it."
+            if fs.destination and re.search(r"\bsay (?:destination|again destination)\b", low):
+                return f"You already know his destination ({fs.destination}); don't ask for it."
+            if fs.aircraft_type and fs.destination and fs.callsign and re.search(r"\bsay (?:request|intentions)\b", low):
+                return "He has asked for his IFR clearance and given everything needed."
+        if fs.callsign and re.search(r"\bsay again (?:your |full )?call ?sign\b", low) and pilot_text:
+            if _digits_in(fs.callsign) and _digits_in(fs.callsign) in _digits_in(pilot_text):
+                return f"His callsign was clear ({fs.callsign}); don't ask for it again."
+        mine = _digits_in(self.fs.facility.freq)
+        if re.search(r"\bcontact\b", low) and mine and mine in _digits_in(sentence) and fs.next_facility \
+                and _digits_in(fs.next_facility.freq) != mine:
+            return f"He is already on your frequency ({self.fs.facility.freq}); don't tell him to contact it."
+        return None
 
     async def _apply_decision(self, d: dict, state: dict, pilot: bool) -> None:
         fs = self.fs

@@ -213,3 +213,39 @@ def test_every_voice_speed_is_within_deepgram_limits():
     for v in PILOT_VOICES:
         for seed in range(20):
             assert 0.7 <= pilot_speed(v, random.Random(seed)) <= 1.5
+
+
+def test_atc_never_asks_for_what_it_already_has():
+    import asyncio
+
+    from atc.controller import Controller
+    from atc.data.airports import get_db
+    from atc.flight import start_flight
+
+    db = get_db()
+    fs = start_flight("t", db.get("KEWR"))
+    c = Controller(fs, db)
+    fs.callsign, fs.aircraft_type = "Cactus 1549", "B747"
+    assert c._pointless("Cactus 1549, say aircraft type.", "")
+    assert not c._pointless("Cactus 1549, say destination.", "")
+    fs.destination = "KLAX"
+    assert c._pointless("Cactus 1549, say request.", "")
+    assert c._pointless("Cactus 1549, Newark Tower, say again callsign.", "Newark Tower, this is Cactus 1549.")
+    assert not c._pointless("say again callsign.", "Newark Tower, this is Cactus.")
+    # Ground never tells him to contact Ground, and doesn't invent a second clearance
+    from dataclasses import replace
+
+    cld = fs.facilities[0]
+    fs.facilities = [cld, replace(cld, id="KEWR-GND", kind="GND", name="Newark Ground", freq="121.8"),
+                     replace(cld, id="KEWR-TWR", kind="TWR", name="Newark Tower", freq="118.3")]
+    fs.clearance_issued, fs.squawk = True, "5720"
+    fs.advance()
+    assert fs.facility.kind == "GND"
+    assert c._pointless(f"Contact Ground {fs.facility.freq} when ready to taxi.", "")
+    said = []
+
+    async def speak(f, s):
+        said.append(s)
+
+    asyncio.run(c.pilot("Newark Ground, Cactus 1549, requesting clearance to LAX.", speak))
+    assert said and "already cleared to" in said[0] and fs.squawk in said[0]
