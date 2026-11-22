@@ -79,6 +79,8 @@ PHRASES = [
     ("cleared for takeoff", r"\bcleared (?:for )?(?:immediate )?take ?off\b", r"take ?off|takeoff"),
     ("line up and wait", r"\bline up and wait\b", r"line up|lining up|\bwait\b"),
     ("hold short", r"\bhold short\b", r"hold(?:ing)? short|\bshort\b"),
+    ("descend via", r"\bdescend via\b", r"\bvia\b"),
+    ("cross runway", r"\bcross(?:ing)? runway\b", r"\bcross"),
     ("cleared to land", r"\bcleared to land\b", r"\bland\b|landing"),
     ("approach clearance", r"\bcleared (?:ils|rnav|gps|visual|vor|loc)\b.*\bapproach\b|\bcleared .*\bapproach\b", r"approach|cleared"),
 ]

@@ -20,7 +20,11 @@ AIRPORT_TYPES = {"large_airport", "medium_airport", "small_airport"}
 # Names controllers actually use where the data doesn't give them, plus a few
 # airport-specific operating habits. Everything else is derived from the data.
 OVERRIDES: dict[str, dict] = {
+    # from real Newark recordings: "Newark Departure, radar contact", a second departure sector before Center,
+    # Ground says "monitor the Tower" (Tower calls you), and United Ramp runs the Terminal C pushbacks
     "KEWR": {"radio_name": "Newark", "spoken_name": "Newark", "initial_altitude": 2500,
+             "dep_radar_name": "Newark", "dep_sector2": ["New York Departure", "120.85"], "monitor_tower": True,
+             "airline_ramp": {"United": ["United Ramp", "129.575"]},
              "dep_runways": {"22": "22R", "4": "4L", "29": "29", "11": "11"},
              "arr_runways": {"22": "22L", "4": "4R", "29": "29", "11": "11"}, "calm_runway": "22"},
     "KJFK": {"radio_name": "Kennedy", "spoken_name": "Kennedy", "initial_altitude": 5000},

@@ -249,3 +249,23 @@ def test_atc_never_asks_for_what_it_already_has():
 
     asyncio.run(c.pilot("Newark Ground, Cactus 1549, requesting clearance to LAX.", speak))
     assert said and "already cleared to" in said[0] and fs.squawk in said[0]
+
+
+def test_real_taxi_routes_and_procedures():
+    import asyncio
+    import random
+
+    from atc.data import procedures, taxi
+
+    m = asyncio.run(taxi.get_map("KEWR", 40.69, -74.17))  # shipped map: no network needed
+    assert m and len(m.gates) > 50
+    gate = m.gate_for("United 123", random.Random(1))
+    assert gate.startswith("C")  # United's terminal
+    r = m.out_route(m.gates[gate], "22R")
+    assert r and r.steps and r.out_phrase().startswith("runway 22R")
+    # Terminals are west of the runways: getting to 4R means crossing 4L
+    r = m.out_route(m.gates["C99"], "4R")
+    assert "cross runway 4L" in r.steps
+    assert procedures.departure("KEWR", "22R", (40.69, -74.17), (42.36, -71.0))["name"] == "NEWARK FIVE"
+    assert procedures.approach("KBOS", "4R")["faf"] == "MILTT"
+    assert procedures.arrival("KBOS", "4R", (40.69, -74.17))

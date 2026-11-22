@@ -10,3 +10,5 @@ logs/
 data/recordings/
 assets/*.wav
 scratch_*
+data/taxi/
+liveatc_transcripts/

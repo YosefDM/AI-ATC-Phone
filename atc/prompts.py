@@ -16,13 +16,23 @@ PHRASEOLOGY
 ("United 123, New York Departure, radar contact"), not on every transmission.
 - Keep it to what a controller would actually say. Usually one or two short sentences; a clearance can be longer.
 - Never use "please" chit-chat, emojis, or explanations of procedures.
+- Real controllers (from Newark recordings) sound like this: "United 2172, Newark Tower, hello, runway 22R at Whiskey, \
+line up and wait." / "United 1222, wind 300 at 4, runway 22R at Whiskey, cleared for takeoff." / "JetBlue 705, \
+Departure, radar contact, climb and maintain 5000, expect Solberg in a moment." / "Allegiant 4612, proceed direct \
+Sparta, contact Departure 124.75." / "Air Canada 585, Newark Ground, runway 22R at Whiskey, taxiway Alpha, Sierra, hold \
+short of Kilo." / "United 269, cross runway 22R at November, Ground point 8." / "Canada 585, monitor the Tower, you'll be \
+number 2." / "We'll see ya." / "For sequence, turn left heading 230." / "November 4 Charlie Hotel, 7 miles from Tugs, turn \
+right heading 160, maintain 2000 until established, cleared RNAV Yankee runway 19 approach." / "Traffic 2 o'clock, 4 \
+miles, northbound, 2200 indicated." / "Sierra 26, maintain 170 knots to Tugs, contact Tower 119.5." Short, rhythmic, a little informal in the \
+pleasantries ("hello", "good day", "we'll see ya"), never in the numbers.
 
 FACTS
 - The FACTS block is ground truth computed by the system. Never invent or change a runway, frequency, squawk, altimeter, \
 wind, ATIS letter, cruise altitude, or next facility. You MAY choose headings, intermediate altitudes within the limits \
 given, speeds, taxiway names, and approach vectors.
-- Taxiway names are not known to the system: invent short plausible routes (1-3 taxiway letters like "B, P" or "K, Z") \
-and stay consistent once issued (record them in updates.taxi_route).
+- When FACTS.taxi_instruction is given, it is the real route on this airport's taxiways: issue it word for word \
+(after the callsign), including any "cross runway" in it, and don't add taxiways. Only when it is null, invent a short \
+plausible route (1-3 taxiway letters like "B, P") and stay consistent once issued (record it in updates.taxi_route).
 
 WRITTEN NUMBER FORMAT (a converter turns this into spoken radio words, so follow it exactly)
 - Altitudes as digits: 2500, 5000, 11000; flight levels as FL230. Headings 3 digits: "heading 090".
@@ -130,25 +140,37 @@ when ready to taxi." with handoff=true. If wrong, correct the specific item (rea
     "GND_dep": """\
 DUTIES — Ground (departure):
 1. Pilot calls ready to taxi (maybe with his gate/ramp and ATIS letter). If his ATIS letter is old or missing, add \
-"Information [current] is current, altimeter [x]." Issue taxi: "[callsign], runway [dep runway], taxi via [route]." (runway first, FAA style) \
-Add a hold-short only for a runway crossing on the way. Required readback: runway and any hold short.
+"Information [current] is current, altimeter [x]." Issue taxi: "[callsign], [FACTS.taxi_instruction]." (runway first, FAA style) \
+Required readback: runway, and any runway crossing or hold short.
 2. If he calls for pushback first, approve: "[callsign], push back approved, advise ready to taxi."
 3. After a correct taxi readback, stay silent. When you get a [TIME PASSES] event (he's taxied to the runway), hand him \
-off: "[callsign], contact [next facility] [frequency]." handoff=true. If he reports holding short / ready before that, \
-hand him off the same way.""",
+off: when FACTS.monitor_tower is true (Newark style) "[callsign], monitor the Tower [frequency]" (optionally "you'll be \
+number 2"), otherwise "[callsign], contact [next facility] [frequency]." handoff=true. If he reports holding short / \
+ready before that, hand him off the same way.""",
+    "RMP_dep": """\
+DUTIES — Ramp control (the airline's ramp tower, gate area only; not FAA, but same radio style):
+1. Pilot calls for pushback from his gate. Approve: "[callsign], ramp, push back approved, advise ready to taxi."
+2. When he's ready to taxi, give FACTS.taxi_instruction exactly ("[callsign], taxi via RG, exit at RG, contact Ground \
+121.8"), handoff=true. Required readback: the spot and the frequency.
+3. Keep it short; ramp controllers are informal ("good evening", "good flight").""",
     "TWR_dep": """\
 DUTIES — Tower (departure):
-1. Pilot reports holding short / ready for departure. Clear him: "[callsign], runway [dep runway], [fly runway heading | \
-turn left/right heading xxx], cleared for takeoff." You may give "line up and wait" first if you want realism, then the \
+1. Pilot reports holding short / ready for departure, or (when FACTS.he_is_monitoring is true) he is just listening and \
+YOU call him first. On first contact say "[callsign], [facility], hello, ...". Usually line him up first: "runway [dep \
+runway], line up and wait", then on the next event: "[callsign], wind [wind], runway [dep runway], \
+[FACTS.procedures.takeoff_instruction], cleared for takeoff." (e.g. "RNAV to Bagga" or "fly heading 190", exactly as \
+given; at Newark the runway is said with the intersection from FACTS.taxi_instruction when it has one, "runway 22R at W") You may give "line up and wait" first if you want realism, then the \
 takeoff clearance on a [TIME PASSES] event or when he reports in position. Wind optional ("wind 320 at 12").
-2. Required readback: runway and cleared for takeoff (plus heading if given).
+2. Required readback: runway and cleared for takeoff (plus the heading or RNAV fix).
 3. After the takeoff readback, stay silent. On the next [TIME PASSES] event (he's airborne), hand off: "[callsign], \
-contact [next facility] [frequency]." handoff=true.""",
+contact Departure [frequency], we'll see ya." handoff=true.""",
     "DEP": """\
 DUTIES — Departure control:
-1. Pilot checks in climbing (e.g. "passing 1500 for 2500"). Reply "[callsign], [facility], radar contact, climb and \
-maintain [FACTS.climb_him_to]" and optionally a heading or "proceed direct" to a plausible fix or \
-"resume own navigation". Record assigned_altitude / assigned_heading.
+1. Pilot checks in climbing (e.g. "1600 climbing 2500"). Reply "[callsign], [facility], radar contact, climb and \
+maintain [FACTS.climb_him_to]" (if FACTS.already_radar_identified, the previous departure sector already did: say \
+"[callsign], [facility], climb and maintain [climb_him_to]" with no "radar contact"). Vectors "for sequence" are \
+normal ("for sequence, turn left heading 230") and, when FACTS.procedures.proceed_direct_fix is given, at some point \
+"proceed direct [that fix]" (or a vector heading first, then the direct). Never invent fix names. Record assigned_altitude / assigned_heading.
 2. After a correct readback, stay silent. On a [TIME PASSES] event: either one more climb (not above \
 departure_altitude_limit) or, if he's already been climbed once, hand off: "[callsign], contact [next facility] \
 [frequency]." handoff=true. Hand off by the second [TIME PASSES] at the latest.""",
@@ -162,34 +184,41 @@ assigned, query it.
    - If this is NOT the last center before arrival: hand off to the next facility ("[callsign], contact [next facility] \
 [frequency]"), handoff=true. Occasionally (not every time) give a short realistic instruction first (a climb to cruise, \
 "proceed direct [fix]", a speed, or a frequency change), then hand off on the following event.
-   - If the next facility is the arrival Approach (or the destination), start the arrival: "[callsign], descend and \
-maintain [arrival_crossing_altitude], [destination] altimeter [x]" (or "descend at pilot's discretion"). After he reads \
+   - If the next facility is the arrival Approach (or the destination), start the arrival. When FACTS.procedures.arrival \
+is given: "[callsign], [arrival.descend_via], [destination] altimeter [x]" (or its crossing_restriction, e.g. "cross \
+Awlin at or above 17000"). Otherwise: "[callsign], descend and maintain [arrival_crossing_altitude], [destination] \
+altimeter [x]". After he reads \
 that back correctly, the next [TIME PASSES] hands him off to approach.""",
     "APP": """\
 DUTIES — Approach control (arrival):
 1. Pilot checks in descending, ideally with the destination ATIS letter. If his ATIS letter is missing/old, give \
 "Information [current] is current, altimeter [x]." Reply "[callsign], [facility], [descend and maintain \
-[approach_altitude] | maintain [altitude]], expect [planned approach]." Optionally a heading for vectors.
-2. On a [TIME PASSES] event, vector and clear him: for ILS/RNAV: "[callsign], [x] miles from [fix/airport], turn \
-left/right heading xxx, maintain [approach_altitude] until established on the localizer, cleared [approach]." For a \
+[approach_altitude] | maintain [altitude]], expect the [planned approach], [destination] altimeter [x]." Optionally a heading for vectors.
+2. On a [TIME PASSES] event, give a speed ("reduce speed to 210", later "170 until 5 mile final" is fine), then vector \
+and clear him: for ILS/RNAV: "[callsign], [x] miles from [FACTS.procedures.approach_fixes.final_approach_fix, else the \
+airport], turn left/right heading xxx, maintain [approach_altitude] until established on the localizer, cleared [approach]." \
+Use only fix names from FACTS. For a \
 visual: "[callsign], airport 12 o'clock, 10 miles, report it in sight" then on the report "cleared visual approach \
 runway [x]". Required readback: heading, altitude, approach clearance.
 3. After a correct approach-clearance readback, on the next [TIME PASSES] event (or when he reports established), hand \
-off: "[callsign], contact [next facility] [frequency]." handoff=true.
+off the way New York Approach does: "[callsign], maintain 170 knots to [final_approach_fix], contact Tower [frequency]." \
+(or just "contact Tower [frequency]"), handoff=true.
 4. If there is no next facility (non-towered destination), after the approach clearance say "[callsign], change to \
 advisory frequency approved" and set flight_complete=true once he acknowledges.""",
     "TWR_arr": """\
 DUTIES — Tower (arrival):
-1. Pilot checks in on final ("[callsign], ILS runway 22L"). Clear him: "[callsign], [facility], runway [arr runway], \
-cleared to land." Wind optional. Required readback: runway and cleared to land.
-2. After the readback, stay silent. On the next [TIME PASSES] event (he has landed), give the exit and handoff: \
-"[callsign], turn left/right next available, contact [next facility] [frequency]." handoff=true. If there is no next \
+1. Pilot checks in on final ("[callsign], ILS runway 22L" or "8 out for 22L"). Clear him: "[callsign], [facility], \
+hello, wind [wind], runway [arr runway], cleared to land." Required readback: runway and cleared to land.
+2. After the readback, stay silent. On the next [TIME PASSES] event (he has landed), give the exit and handoff. When \
+FACTS.taxi_instruction is given, use it word for word: "[callsign], [taxi_instruction]." (e.g. "cross runway 4L at J, \
+Ground point 8"; "Ground point 8" IS the frequency, don't add it again), handoff=true. Otherwise "[callsign], turn left/right next available, contact [next facility] [frequency]." handoff=true. If there is no next \
 facility, "turn left next available, taxi to parking" and flight_complete=true after his readback.""",
     "GND_arr": """\
 DUTIES — Ground (arrival):
-1. Pilot calls clear of the runway ("clear of 22L at K"). Issue taxi to his gate from FACTS.his_gate: "[callsign], \
-[facility], taxi to gate [his_gate] via [route]" (or "taxi to the ramp via [route]" when his_gate is "the ramp"; use his \
-own gate if he names one). Required readback: route and any hold short.
+1. Pilot calls clear of the runway ("clear of 22L at K"). Issue taxi to his gate: "[callsign], \
+[facility], [FACTS.taxi_instruction]" when given; otherwise "taxi to gate [his_gate] via [route]" (or "taxi to the ramp \
+via [route]" when his_gate is "the ramp"; use his own gate if he names one). Required readback: any runway crossing or \
+hold short.
 2. After a correct readback, the flight is done: action="speak", say a short "[callsign], roger." or nothing, and set \
 flight_complete=true.""",
 }
@@ -199,6 +228,8 @@ ROLES = {"CLD": "clearance delivery", "GND": "ground control", "TWR": "local con
 
 
 def duty_key(fac: Facility) -> str:
+    if "-RMP-" in fac.id:
+        return "RMP_dep"
     if fac.kind in ("GND", "TWR"):
         return f"{fac.kind}_{'arr' if fac.phase == 'arr' else 'dep'}"
     return fac.kind
@@ -234,6 +265,11 @@ def facts(fs: FlightState, extra: dict) -> dict:
         "altitude_request": extra.get("altitude_request"),
         "traffic": extra.get("traffic"),
         "his_gate": extra.get("gate"),
+        "taxi_instruction": extra.get("taxi_instruction"),
+        "monitor_tower": extra.get("monitor_tower", False),
+        "he_is_monitoring": extra.get("he_is_monitoring", False),
+        "already_radar_identified": fac.kind == "DEP" and fs.idx > 0 and fs.facilities[fs.idx - 1].kind == "DEP",
+        "procedures": extra.get("procedures"),
         "current_atis_letter": extra.get("dep_wx", {}).get("atis_letter"),
         "nearest_airports": extra.get("nearest_airports"),
         "readback_failures": fs.readback_failures,

@@ -208,3 +208,33 @@ class RadioStream:
         out = x[self.phase :: 2]
         self.phase = (self.phase - len(x)) % 2
         return to_int16(out)
+
+
+def aircraft_profile(callsign: str, base: RadioProfile) -> RadioProfile:
+    """Each other aircraft has its own signal: some close and loud, some far off, weak and noisy."""
+    h = hashlib.sha1((callsign or "").encode()).digest()
+    far = h[0] / 255.0  # 0 = close, 1 = at the edge of range
+    return RadioProfile(
+        low_hz=base.low_hz + (h[1] / 255.0 - 0.5) * 100,
+        high_hz=base.high_hz - far * 250,
+        drive=base.drive + far * 1.2,
+        hiss_db=base.hiss_db - 9 + far * 13,  # strong signals barely hiss; weak ones are buried in it
+        level=base.level * (1.0 - 0.25 * far),
+        crackle=base.crackle + far * 0.01,
+    )
+
+
+def heterodyne(n: int, rng: np.random.Generator | None = None) -> np.ndarray:
+    """Two transmitters on one frequency: their carriers beat into a squeal (8 kHz float).
+
+    Real carriers are never exactly on frequency, so the beat lands somewhere in the audio band and
+    wanders as the transmitters drift, with a growl of the two voices cross-modulating underneath."""
+    rng = rng or np.random.default_rng()
+    t = np.arange(n) / PHONE_RATE
+    f0 = rng.uniform(700, 2300)
+    drift = f0 + rng.uniform(80, 300) * np.sin(2 * np.pi * rng.uniform(0.3, 1.5) * t + rng.uniform(0, 6))
+    ph = 2 * np.pi * np.cumsum(drift) / PHONE_RATE
+    tone = np.sin(ph) + 0.35 * np.sin(2 * ph)
+    rough = 1 + 0.5 * np.sin(2 * np.pi * rng.uniform(25, 60) * t)  # AM cross-modulation buzz
+    env = np.minimum(1.0, np.minimum(t / 0.03, (t[-1] - t) / 0.05 + 1e-3)) if n else t
+    return (0.22 * tone * rough * env).astype(np.float32)

@@ -212,7 +212,8 @@ def _radar_facility(db: AirportDB, ap: Airport, kind: str, phase: str) -> Facili
     for k in order:
         f = ap.freq(k)
         if f:
-            base = ap.override.get("radar_name") or facility_name_from_desc(f.desc, ap.radio_name)
+            base = ((ap.override.get("dep_radar_name") if kind == "DEP" else None) or ap.override.get("radar_name")
+                    or facility_name_from_desc(f.desc, ap.radio_name))
             return Facility(f"{ap.ident}-{kind}-{phase}", kind, f"{base} {word}",
                             f.text, ap.ident, phase)
     for k in order:
@@ -254,12 +255,20 @@ def build_plan(fs: FlightState, db: AirportDB, dep: Airport, dest: Airport, dep_
     if first:
         facs.append(first)
     for kind in ("CLD", "GND", "TWR"):
+        if kind == "GND":
+            # an airline's own ramp control handles the pushback and the gate area first (e.g. United at Newark)
+            for airline, (rname, rfreq) in dep.override.get("airline_ramp", {}).items():
+                if (fs.callsign or "").lower().startswith(airline.lower()):
+                    facs.append(Facility(f"{dep.ident}-RMP-dep", "GND", rname, rfreq, dep.ident, "dep"))
         f = _airport_facility(dep, kind, "dep")
         if f and all(x.id != f.id for x in facs):
             facs.append(f)
     dep_radar = _radar_facility(db, dep, "DEP", "dep")
     if dep_radar:
         facs.append(dep_radar)
+        s2 = dep.override.get("dep_sector2")
+        if s2 and klass != "piston":
+            facs.append(Facility(f"{dep.ident}-DEP2-dep", "DEP", s2[0], s2[1], dep.ident, "dep"))
     centers = artcc.centers_along(dep.lat, dep.lon, dest.lat, dest.lon)
     if not dep_radar and not centers:
         centers = [artcc.nearest_artcc(dep.lat, dep.lon)]

@@ -84,6 +84,8 @@ class CallSession:
 
         # push-to-talk
         self.transmitting = False
+        self.atc_talking_since = 0.0
+        self.stepped_on = False  # he keyed up over ATC: that exchange was blocked
         self.tx_frames: list[np.ndarray] = []
         self.tx_started = 0.0
         self.preroll: collections.deque[np.ndarray] = collections.deque(maxlen=max(1, int(settings.preroll_s / 0.02)))
@@ -270,7 +272,9 @@ class CallSession:
     async def _start_tx(self) -> None:
         self.offer_resume = None
         if self.playing == "atc":
-            # ATC is already talking: keying up steps on it, so that reply is cut off
+            # ATC is already talking: keying up steps on it, so that reply is cut off. If it had been talking
+            # a while, neither side got through (both transmitting at once): the controller says "blocked".
+            self.stepped_on = time.monotonic() - self.atc_talking_since > 1.0
             await self.cancel_work()
             await self.stop_playback()
         else:
@@ -384,6 +388,15 @@ class CallSession:
             await self._play_chatter(single_atc=True)
         self.ctl.traffic = self.traffic_hint()
         out = Outgoing(self)
+        blocked, self.stepped_on = self.stepped_on, False
+        if blocked and text and len(text.split()) >= 3:
+            # two transmitters at once: the controller heard only a squeal, so he hears "blocked" and calls again
+            log.info("his transmission was blocked (keyed over ATC)")
+            if self.rec:
+                self.rec.event("blocked")
+            await self.ctl._say(out.speak, "You were blocked, say again.")
+            await out.finish()
+            return
         try:
             await self.ctl.pilot(text, out.speak)
         except asyncio.CancelledError:
@@ -564,6 +577,7 @@ class CallSession:
         if self.rec:
             self.rec.event("chatter", lines=[f"{ln.who}: {ln.text}" for ln in lines])
         self.playing = "chatter"
+        blocked_done = False
         try:
             for i, ln in enumerate(lines):
                 if self.playing != "chatter":
@@ -573,9 +587,17 @@ class CallSession:
                 if ln.who == "atc":
                     prof, voice = atc_prof, atc_voice
                 else:
-                    prof = OTHER_PILOT_PROFILE
+                    prof = radio.aircraft_profile(ln.callsign or "", OTHER_PILOT_PROFILE)
                     pv = ln.voice or chatter.PILOT_VOICES[0]
                     voice = Voice(pv, speed=chatter.pilot_speed(pv, random.Random()))
+                    chance = {"busy": 0.10, "normal": 0.06, "light": 0.03}.get(self.effective_chatter, 0)
+                    if not blocked_done and random.random() < chance:
+                        blocked_done = True
+                        await self._blocked_pair(ln, prof, voice, atc_prof, atc_voice)
+                        if self.playing != "chatter":
+                            return
+                        await self.send_audio(np.zeros(int(PHONE_RATE * random.uniform(0.6, 1.0)), dtype=np.int16),
+                                              mark=False)  # ...and then he tries again
                 rs = radio.RadioStream(prof)
                 await self.send_audio(radio.to_phone(radio.key_up(prof)), mark=False)
                 async for chunk, rate in self.svc.tts.stream(spoken.speak(ln.text, ln.callsign), voice):
@@ -587,6 +609,41 @@ class CallSession:
             log.exception("chatter failed")
             if self.playing == "chatter":
                 self.playing = None
+
+    async def _blocked_pair(self, ln, prof, voice, atc_prof, atc_voice) -> None:
+        """Two other aircraft transmit at once: a squeal over both, then the controller: 'Blocked.'"""
+        others = [c for c in (self.callsign_pool or []) if c != ln.callsign] or ["N427CP"]
+        cs2 = random.choice(others)
+        v2 = random.choice([v for v in chatter.PILOT_VOICES if v != voice.model] or chatter.PILOT_VOICES)
+        p2 = radio.aircraft_profile(cs2, OTHER_PILOT_PROFILE)
+
+        async def clip(text, cs, v, p):
+            audio, rate = await self.svc.tts.synthesize_async(spoken.speak(text, cs), v)
+            rs = radio.RadioStream(p)
+            return np.concatenate([radio.to_phone(radio.key_up(p)), rs.process(audio, rate)]).astype(np.float32) / 32768
+
+        a = await clip(ln.text, ln.callsign, voice, prof)
+        b = await clip(f"{cs2}, with you, level", cs2, Voice(v2, speed=1.15), p2)
+        start = int(PHONE_RATE * random.uniform(0.35, 0.9))
+        n = max(len(a), start + len(b))
+        mix = np.zeros(n, dtype=np.float32)
+        mix[: len(a)] += a * 0.8
+        mix[start : start + len(b)] += b * 0.8
+        end = min(len(a), start + len(b))
+        if end > start:
+            mix[start:end] += radio.heterodyne(end - start)
+        await self.send_audio(to_int16(np.clip(mix, -1, 1)), mark=False)
+        await self.send_audio(radio.to_phone(radio.squelch_tail()), mark=False)
+        await self.send_audio(np.zeros(int(PHONE_RATE * random.uniform(0.4, 0.8)), dtype=np.int16), mark=False)
+        rs = radio.RadioStream(atc_prof)
+        await self.send_audio(radio.to_phone(radio.key_up(atc_prof)), mark=False)
+        said = random.choice(["You were blocked, say again.", "Last two aircraft, you were blocked, say again.",
+                              "Blocked. Last aircraft calling, say again."])
+        async for chunk, rate in self.svc.tts.stream(said, atc_voice):
+            if self.playing != "chatter":
+                return
+            await self.send_audio(rs.process(chunk, rate), mark=False)
+        await self.send_audio(radio.to_phone(radio.squelch_tail()), mark=False)
 
     # ------------------------------------------------------------ phone list (keypad menu)
 
@@ -867,6 +924,7 @@ class Outgoing:
                 profile = radio.profile_for(fac.id, fac.kind)
                 stream = radio.RadioStream(profile)
                 call.playing = "atc"
+                call.atc_talking_since = time.monotonic()
                 await call.send_audio(radio.to_phone(radio.key_up(profile)), mark=False)
             try:
                 async for chunk, rate in call.svc.tts.stream(text, voice):

@@ -252,6 +252,11 @@ def approach_for(ap: Airport, rwy: Runway, wx: Weather) -> str:
     """Approach type the controller will expect, in written form."""
     if not wx.imc:
         return f"visual approach runway {rwy.ident}"
+    from .procedures import approach
+
+    real = approach(ap.ident, rwy.ident)  # what's actually published for this runway
+    if real:
+        return f"{real['name']} approach"
     if rwy.length_ft >= 5000 and ap.kind in ("large_airport", "medium_airport"):
         return f"ILS runway {rwy.ident} approach"
     return f"RNAV runway {rwy.ident} approach"
@@ -292,14 +297,14 @@ def _temp(c: int) -> str:
 def atis_spoken(ap: Airport, wx: Weather, dep: Runway | None, arr: Runway | None) -> str:
     """Complete ATIS broadcast, already in spoken form."""
     sp = spoken
-    parts = [f"{ap.spoken_name} airport information {wx.atis_word}.",
+    parts = [f"{ap.spoken_name} airport ATIS information {wx.atis_word}.",
              f"{sp.digits(wx.obs_time.strftime('%H%M'))} Zulu.",]
     if wx.wind_speed < 3:
         parts.append("Wind calm.")
     else:
         d = "variable" if wx.wind_dir is None else sp.digits(f"{wx.wind_dir:03d}")
         g = f", gusts {sp.digits(str(wx.wind_gust))}" if wx.wind_gust else ""
-        parts.append(f"Wind {d} at {sp.digits(str(wx.wind_speed))}{g}.")
+        parts.append(f"Wind {d} at {sp.digits(str(wx.wind_speed))} knots{g}.")
     vis = int(wx.visibility_sm) if wx.visibility_sm >= 1 else None
     parts.append(f"Visibility {sp.digits(str(vis)) if vis else 'less than one'}.")
     w = _wx_spoken(wx.wx)
@@ -324,7 +329,11 @@ def atis_spoken(ap: Airport, wx: Weather, dep: Runway | None, arr: Runway | None
         parts.append(sp.speak(approach_for(ap, arr, wx).capitalize() + " in use.") )
     if dep:
         parts.append(f"Departing runway {sp.runway(dep.number, dep.ident[len(dep.number):])}.")
-    if ap.towered and ap.freq("CLD"):
-        parts.append(f"Clearance delivery frequency {sp.frequency(ap.freq('CLD').text)}.")
+    if ap.towered:
+        if wx.wind_gust and wx.wind_gust >= 25:
+            parts.append("Low level wind shear advisories in effect.")
+        if ap.kind == "large_airport":
+            parts.append(f"Use caution for birds in the vicinity of {ap.spoken_name} airport.")
+        parts.append("Read back all runway hold short instructions and assigned altitude.")
     parts.append(f"Advise on initial contact you have information {wx.atis_word}.")
     return " ".join(parts)

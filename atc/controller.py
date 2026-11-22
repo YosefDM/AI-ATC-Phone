@@ -15,9 +15,10 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
 from .brain import Brain
+from .data import procedures, taxi
 from .data.airports import Airport, AirportDB, nm_between
 from .data.weather import Weather, get_weather, prefetch
-from .flight import Facility, FlightState, build_plan
+from .flight import Facility, FlightState, aircraft_class, build_plan
 from .prompts import build_messages, duty_key
 from .readback import check as readback_check
 from .speech import spoken
@@ -26,7 +27,7 @@ from .speech.tts import voice_for_slot
 log = logging.getLogger(__name__)
 
 NO_RESPONSE_AFTER_S = 15.0
-PROGRESS_DELAY_S = {"GND_dep": 25.0, "TWR_dep": 18.0, "DEP": 30.0, "CTR": 40.0, "APP": 30.0, "TWR_arr": 22.0}
+PROGRESS_DELAY_S = {"RMP_dep": 25.0, "GND_dep": 25.0, "TWR_dep": 18.0, "DEP": 30.0, "CTR": 40.0, "APP": 30.0, "TWR_arr": 22.0}
 MAX_PROGRESS_NUDGES = 5
 
 _NUMWORDS = {"zero": "0", "one": "1", "two": "2", "three": "3", "four": "4", "five": "5", "six": "6", "seven": "7",
@@ -85,11 +86,118 @@ class Controller:
         out = {"dep": dep.to_brief(), "dep_wx": dep_wx.to_brief()}
         dest = self.dest
         if dest:
+            taxi.prefetch_map(dest.ident, dest.lat, dest.lon)  # ready long before he lands
             dest_wx = await get_weather(dest)
             out["dest"] = dest.to_brief()
             out["dest_wx"] = dest_wx.to_brief()
             out["approach_altitude"] = max(2000, int(round((dest.elev + 2200) / 500.0)) * 500)
         return out
+
+    # the only Newark Five headings the chart gives in plain words (the rest stay "fly runway heading")
+    VECTOR_SID_HEADINGS = {("KEWR", "22R"): 190, ("KEWR", "22L"): 190}
+
+    def procedure_facts(self) -> dict | None:
+        """Published departure / arrival / approach for this leg, in the words a controller would use."""
+        fs = self.fs
+        key = duty_key(fs.facility)
+        out: dict = {}
+        sid = fs.assigned.get("sid")
+        if key == "TWR_dep" and fs.dep_runway:
+            if sid and sid.get("rnav") and sid.get("first_fix"):
+                out["takeoff_instruction"] = f"RNAV to {procedures.title(sid['first_fix'])}"
+            else:
+                h = self.VECTOR_SID_HEADINGS.get((self.dep.ident, fs.dep_runway))
+                out["takeoff_instruction"] = f"fly heading {h:03d}" if h else "fly runway heading"
+        if key == "DEP" and sid:
+            fix = sid.get("transition") or sid.get("first_fix")
+            if fix:
+                out["proceed_direct_fix"] = procedures.title(fix)
+        if key in ("CTR", "APP") and self.dest:
+            star = fs.assigned.get("star")
+            if star is None:
+                star = procedures.arrival(self.dest.ident, fs.arr_runway, (self.dep.lat, self.dep.lon)) or {}
+                fs.assigned["star"] = star
+            if star and aircraft_class(fs.aircraft_type) != "piston":
+                name = procedures.title(star["name"])
+                cross = next((r for r in star.get("restrictions", []) if r[2] and r[2] < 18000), None)
+                out["arrival"] = {"name": f"{name} arrival", "descend_via": f"descend via the {name} arrival",
+                                  "crossing_restriction": (f"cross {procedures.title(cross[0])} at "
+                                                           f"{'or above ' if cross[1] == '+' else 'or below ' if cross[1] == '-' else ''}"
+                                                           f"{cross[2]}") if cross else None}
+        if key == "APP" and self.dest and fs.arr_runway and fs.arr_approach and "visual" not in fs.arr_approach:
+            ap = procedures.approach(self.dest.ident, fs.arr_runway)
+            if ap:
+                out["approach_fixes"] = {"final_approach_fix": procedures.title(ap["faf"]) if ap.get("faf") else None,
+                                         "final_approach_fix_altitude": ap.get("faf_alt"),
+                                         "initial_fix": procedures.title(ap["iaf"]) if ap.get("iaf") else None}
+        return out or None
+
+    async def _taxi_instruction(self) -> str | None:
+        """The real route on the airport's taxiways (computed once per leg), for Ground to issue exactly."""
+        fs = self.fs
+        key = duty_key(fs.facility)
+        airline = bool(fs.callsign and not re.match(r"N\d", fs.callsign))
+        try:
+            if key in ("RMP_dep", "GND_dep") and fs.dep_runway:
+                if "taxi_out" not in fs.assigned:
+                    ap = self.dep
+                    m = await taxi.get_map(ap.ident, ap.lat, ap.lon)
+                    if not m:
+                        return None
+                    gate = None
+                    if airline:
+                        said = (fs.parking or "").upper().replace("GATE", "").strip()
+                        gate = said if said in m.gates else m.gate_for(fs.callsign, random.Random(fs.id))
+                    r = await taxi.taxi_out(ap.ident, ap.lat, ap.lon, fs.dep_runway, gate)
+                    fs.assigned["taxi_out"] = r.out_phrase() if r else ""
+                    fs.assigned["dep_gate"] = gate
+                    ramp = any("-RMP-" in f.id for f in fs.facilities)
+                    if r and ramp:
+                        # the ramp controller takes him through the alleyways to a spot; Ground from there
+                        lanes = []
+                        for st in r.steps:
+                            if not re.fullmatch(r"R[A-Z]", st):  # Newark's ramp alleys are RA..RN
+                                break
+                            lanes.append(st)
+                        rest = r.steps[len(lanes):]
+                        spot = lanes[-1] if lanes else (rest[0] if rest else "")
+                        gnd = next((f for f in fs.facilities if f.kind == "GND" and "-RMP-" not in f.id), None)
+                        fs.assigned["ramp_taxi"] = (f"taxi via {', '.join(lanes)}, exit at {spot}, contact Ground "
+                                                    f"{gnd.freq if gnd else ''}") if lanes else (
+                            f"taxi to {spot}, contact Ground {gnd.freq if gnd else ''}")
+                        fs.assigned["spot"] = spot
+                        fs.assigned["taxi_out"] = r.out_phrase(rest)
+                if key == "RMP_dep":
+                    return fs.assigned.get("ramp_taxi") or None
+                return fs.assigned["taxi_out"] or None
+            if key in ("TWR_arr", "GND_arr") and fs.arr_runway and self.dest:
+                if "arr_route" not in fs.assigned:
+                    ap = self.dest
+                    m = await taxi.get_map(ap.ident, ap.lat, ap.lon)
+                    if not m:
+                        return None
+                    gate = m.gate_for(fs.callsign, random.Random(fs.id + "in")) if airline else None
+                    if gate:
+                        fs.assigned["gate"] = gate
+                    r = await taxi.taxi_in(ap.ident, ap.lat, ap.lon, fs.arr_runway, gate)
+                    fs.assigned["arr_route"] = r.steps if r else []
+                st = fs.assigned["arr_route"]
+                if not st:
+                    return None
+                crossed = len(st) > 1 and not st[0].startswith("cross") and st[1].startswith("cross")
+                if key == "TWR_arr":
+                    gnd = fs.next_facility
+                    short = f"Ground point {gnd.freq.split('.', 1)[1]}" if gnd and "." in gnd.freq else "contact Ground"
+                    if crossed:
+                        return f"{st[1]} at {st[0]}, {short}"  # how Newark Tower clears arrivals off the runway
+                    return f"turn off at {st[0]}, {short}"
+                gate = fs.assigned.get("gate")
+                where = f"gate {gate}" if gate and gate != "the ramp" else "the ramp"
+                rest = st[2:] if crossed else st  # Tower already crossed him
+                return f"taxi to {where} via {', '.join(rest)}" if rest else f"taxi to {where}"
+        except Exception:  # noqa: BLE001
+            log.warning("taxi route failed", exc_info=True)
+        return None
 
     async def atis_airport(self) -> tuple[Airport, Weather]:
         """The ATIS he'd tune: departure until airborne, then destination."""
@@ -112,6 +220,8 @@ class Controller:
         if fs.expects_reply and fs.no_response_count < 2:
             return "no_response", fs.last_activity + NO_RESPONSE_AFTER_S
         key = duty_key(fs.facility)
+        if key == "TWR_dep" and fs.assigned.get("monitoring") and not self._said_here(r"line up|cleared for take"):
+            return "progress", fs.last_activity + 10.0  # he's monitoring: Tower calls him when it's his turn
         if key == "GND_dep" and not self._said_here(r"\btaxi via\b|\btaxi to runway\b|runway \w+, taxi\b"):
             return None  # pushed back, not taxiing yet: it's his turn to call ready to taxi
         if key in PROGRESS_DELAY_S and fs.exchanges >= 1 and fs.progress_nudges < MAX_PROGRESS_NUDGES and not fs.expects_reply:
@@ -130,7 +240,8 @@ class Controller:
         cur = fs.assigned.get("altitude") or fs.initial_altitude or 0
         fac, nxt = fs.facility, fs.next_facility
         if fac.kind == "DEP":
-            target = min(fs.cruise_altitude, 13000)
+            # with two departure sectors (Newark), the first stops him around 5000, the second takes him up
+            target = min(fs.cruise_altitude, 5000 if (nxt and nxt.kind == "DEP") else 13000)
         elif fac.kind == "CTR" and not (nxt and nxt.kind != "CTR" and self._said_here(r"\bdescend")):
             target = fs.cruise_altitude
         else:
@@ -147,7 +258,12 @@ class Controller:
             issued = self._said_here(r"\btaxi via\b|\btaxi to runway\b|runway \w+, taxi\b")
             return handoff if issued else "wait for him to call ready to taxi, then issue his taxi clearance (runway, route)."
         if key == "TWR_dep":
-            return handoff if self._said_here(r"cleared for takeoff") else "clear him for takeoff."
+            if self._said_here(r"cleared for takeoff"):
+                return handoff
+            if fs.assigned.get("monitoring") and not self._said_here(r"line up and wait"):
+                return ("he is monitoring your frequency and will not call you: call him first, 'Newark Tower, hello', "
+                        "and line him up ('line up and wait').")
+            return "clear him for takeoff (with the wind)."
         if key in ("DEP", "CTR"):
             climb = self.climb_target()
             if climb:
@@ -155,6 +271,10 @@ class Controller:
                 return f"climb him: 'climb and maintain {alt}'."
             if key == "CTR" and nxt and nxt.kind != "CTR" and not self._said_here(r"\bdescend"):
                 dest = self.dest
+                arr = (self.procedure_facts() or {}).get("arrival")
+                if arr:
+                    return (f"start his descent on the published arrival: '{arr['descend_via']}, "
+                            f"{dest.spoken_name if dest else ''} altimeter [destination altimeter]'.")
                 cross = min(fs.cruise_altitude or 11000, 11000)
                 return (f"start his descent: 'descend and maintain {cross}, {dest.spoken_name if dest else ''} "
                         "altimeter [destination altimeter]'.")
@@ -287,6 +407,10 @@ class Controller:
         extra["climb_target"] = self.climb_target()
         extra["frequency_busy"] = self.frequency_busy
         extra["traffic"] = self.traffic
+        extra["taxi_instruction"] = await self._taxi_instruction()
+        extra["monitor_tower"] = bool(self.dep.override.get("monitor_tower")) and duty_key(fs.facility) == "GND_dep"
+        extra["he_is_monitoring"] = bool(fs.assigned.get("monitoring")) and duty_key(fs.facility) == "TWR_dep"
+        extra["procedures"] = self.procedure_facts()
         if duty_key(fs.facility) == "GND_arr" and "gate" not in fs.assigned:
             airline = fs.callsign and not re.match(r"N\d", fs.callsign)
             fs.assigned["gate"] = (f"{random.choice('ABC')}{random.randint(1, 40)}" if airline else "the ramp")
@@ -384,7 +508,8 @@ class Controller:
         if state["handoff"] and fs.next_facility and state["mode"] == "speak":
             said = " ".join(state["spoken"])
             nf = fs.next_facility
-            if _digits_in(nf.freq) not in _digits_in(said):
+            short = "." in nf.freq and re.search(rf"\bpoint {re.escape(nf.freq.split('.', 1)[1])}\b", said)
+            if _digits_in(nf.freq) not in _digits_in(said) and not short:
                 tail = f"Contact {nf.name} {nf.freq}."
                 state["spoken"].append(tail)
                 await speak(fac, tail)
@@ -409,6 +534,8 @@ class Controller:
                 # the model told him to switch without flagging it: treat it as the handoff
                 fs.handoff_pending = True
                 fs.expects_reply = False
+            if re.search(r"\bmonitor (?:the )?tower\b", full, re.I):
+                fs.assigned["monitoring"] = True  # he won't call Tower; Tower will call him
             fs.add_turn("atc", full)
             fs.last_atc_text = full
         self.touch()
@@ -686,13 +813,24 @@ class Controller:
         dep_fac = next((f for f in fs.facilities if f.kind in ("DEP", "CTR")), None)
         cruise = fs.cruise_altitude
         cruise_s = f"FL{cruise // 100}" if cruise >= 18000 else f"{cruise}"
-        text = (f"{cs}, cleared to {dest.spoken_name} airport via radar vectors, then as filed. "
+        sid = None
+        if aircraft_class(fs.aircraft_type) != "piston" and fs.dep_runway:
+            sid = procedures.departure(dep.ident, fs.dep_runway, (dep.lat, dep.lon), (dest.lat, dest.lon))
+        if sid:
+            fs.assigned["sid"] = sid
+            route = f"via the {procedures.title(sid['name'])} departure"
+            if sid.get("transition"):
+                route += f", {procedures.title(sid['transition'])} transition"
+            route_item = f"{procedures.title(sid['name'])} departure"
+        else:
+            route, route_item = "via radar vectors", "radar vectors"
+        text = (f"{cs}, cleared to {dest.spoken_name} airport {route}, then as filed. "
                 f"Climb and maintain {fs.initial_altitude}, expect {cruise_s} 10 minutes after departure. "
                 f"Departure frequency {dep_fac.freq if dep_fac else '124.7'}, squawk {fs.squawk}.")
         if fs.atis_reported != dep_wx.atis_word:
             text += f" Information {dep_wx.atis_word} is current, altimeter {dep_wx.altimeter}."
         fs.clearance_issued = True
-        fs.pending_readback = [f"cleared to {dest.spoken_name}", "radar vectors then as filed",
+        fs.pending_readback = [f"cleared to {dest.spoken_name}", f"{route_item} then as filed",
                                f"climb and maintain {fs.initial_altitude}",
                                f"departure frequency {dep_fac.freq if dep_fac else ''}", f"squawk {fs.squawk}"]
         fs.expects_reply = True
