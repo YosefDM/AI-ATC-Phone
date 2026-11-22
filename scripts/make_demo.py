@@ -19,7 +19,7 @@ from types import SimpleNamespace
 import numpy as np
 from openai import AsyncOpenAI
 
-from atc import chatter
+from atc import chatter, realism
 from atc.audio import radio
 from atc.audio.codec import PHONE_RATE, resample, to_int16, ulaw_encode, wav_bytes
 from atc.call import COCKPIT_DUCK, COCKPIT_GAIN, OTHER_PILOT_PROFILE
@@ -95,7 +95,9 @@ class Demo:
         rs = radio.RadioStream(prof)
         parts = [radio.to_phone(radio.key_up(prof)).astype(np.float32) / 32768]
         for s in sentences:
-            audio, rate = await self._speech(spoken.speak(s, callsign or self.fs.callsign), v)
+            said = realism.humanize(s, callsign or self.fs.callsign, None if callsign else self.fs.aircraft_type,
+                                    self.rng, slips=fac.kind != "CLD")
+            audio, rate = await self._speech(spoken.speak(said, callsign or self.fs.callsign), v)
             parts.append(rs.process(audio, rate).astype(np.float32) / 32768)
         parts.append(radio.to_phone(radio.squelch_tail()).astype(np.float32) / 32768)
         await self.advance(voice=np.concatenate(parts))

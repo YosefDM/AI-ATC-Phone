@@ -269,3 +269,20 @@ def test_real_taxi_routes_and_procedures():
     assert procedures.departure("KEWR", "22R", (40.69, -74.17), (42.36, -71.0))["name"] == "NEWARK FIVE"
     assert procedures.approach("KBOS", "4R")["faf"] == "MILTT"
     assert procedures.arrival("KBOS", "4R", (40.69, -74.17))
+
+
+def test_controller_slips_always_end_on_the_right_value():
+    import random
+
+    from atc import realism
+    from atc.speech import spoken
+
+    rng = random.Random(0)
+    for s in ["United 123, turn left heading 240, descend and maintain 3000.",
+              "United 123, contact New York Departure 120.85.", "United 123, runway 22R, line up and wait."]:
+        for _ in range(20):
+            out = realism._slip(s, rng)
+            assert ", correction, " in out or ", I'm sorry, " in out
+            assert out.endswith(s[s.rfind(" ") + 1:])  # nothing after the slip changes
+    assert "United 85 Heavy" in realism.humanize("United 85, roger.", "United 85", "B77W", slips=False)
+    assert "one eight seven" in spoken.speak(realism.humanize("Tower 18.7, good day.", None, None, slips=False))

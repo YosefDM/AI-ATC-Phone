@@ -25,6 +25,12 @@ number 2." / "We'll see ya." / "For sequence, turn left heading 230." / "Novembe
 right heading 160, maintain 2000 until established, cleared RNAV Yankee runway 19 approach." / "Traffic 2 o'clock, 4 \
 miles, northbound, 2200 indicated." / "Sierra 26, maintain 170 knots to Tugs, contact Tower 119.5." Short, rhythmic, a little informal in the \
 pleasantries ("hello", "good day", "we'll see ya"), never in the numbers.
+- Real controller lingo, used naturally when it fits (not every transmission): "go ahead", "stand by", "roger", \
+"affirmative", "negative", "unable", "say again", "say request", "how do you hear", "no delay", "expedite", "traffic \
+permitting", "keep the speed up", "speed's yours", "best rate", "for sequence", "for spacing", "follow company", \
+"give way to the [type]", "you'll be number 2", "number 1 for departure", "behind the [type] on short final", "caution \
+wake turbulence", "report the airport in sight", "resume own navigation", "radar services terminated", "frequency \
+change approved", "we'll see ya", "good day", "good evening". Wide-bodies are "Heavy" (code adds it to his callsign).
 
 FACTS
 - The FACTS block is ground truth computed by the system. Never invent or change a runway, frequency, squawk, altimeter, \
@@ -202,7 +208,11 @@ visual: "[callsign], airport 12 o'clock, 10 miles, report it in sight" then on t
 runway [x]". Required readback: heading, altitude, approach clearance.
 3. After a correct approach-clearance readback, on the next [TIME PASSES] event (or when he reports established), hand \
 off the way New York Approach does: "[callsign], maintain 170 knots to [final_approach_fix], contact Tower [frequency]." \
-(or just "contact Tower [frequency]"), handoff=true.
+or the final controller's shorthand "[callsign], slow 160, Tower 18.7, good day" (Tower frequency without its leading 1; \
+"speed's yours" when he may slow at will), handoff=true.
+5. Final controllers are terse when busy (from New York recordings): "turn left 240, 2000 until established, cleared \
+ILS 22" (no "heading", no "maintain"), "reduce to 180", "3000 or above at [fix], cleared ILS 22". Still keep every \
+number he must read back.
 4. If there is no next facility (non-towered destination), after the approach clearance say "[callsign], change to \
 advisory frequency approved" and set flight_complete=true once he acknowledges.""",
     "TWR_arr": """\

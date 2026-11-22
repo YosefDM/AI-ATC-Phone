@@ -509,7 +509,8 @@ class Controller:
         if state["handoff"] and fs.next_facility and state["mode"] == "speak":
             said = " ".join(state["spoken"])
             nf = fs.next_facility
-            short = "." in nf.freq and re.search(rf"\bpoint {re.escape(nf.freq.split('.', 1)[1])}\b", said)
+            short = ("." in nf.freq and re.search(rf"\bpoint {re.escape(nf.freq.split('.', 1)[1])}\b", said)) or (
+                nf.freq.startswith("1") and nf.keyword in said.lower() and re.search(rf"\b{re.escape(nf.freq[1:])}\b", said))
             if _digits_in(nf.freq) not in _digits_in(said) and not short:
                 tail = f"Contact {nf.name} {nf.freq}."
                 state["spoken"].append(tail)

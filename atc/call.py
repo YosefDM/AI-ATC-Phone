@@ -30,7 +30,7 @@ from fastapi import WebSocket
 from .audio import radio
 from .audio.codec import FRAME_SAMPLES, PHONE_RATE, resample, to_int16, ulaw_decode, ulaw_encode
 from .audio.detect import SpeechDetector, is_dtmf_frame, mute_dtmf
-from . import chatter
+from . import chatter, realism
 from .config import settings
 from .director import Director
 from .recorder import CallRecorder
@@ -600,7 +600,8 @@ class CallSession:
                                               mark=False)  # ...and then he tries again
                 rs = radio.RadioStream(prof)
                 await self.send_audio(radio.to_phone(radio.key_up(prof)), mark=False)
-                async for chunk, rate in self.svc.tts.stream(spoken.speak(ln.text, ln.callsign), voice):
+                said = realism.humanize(ln.text, None, None) if ln.who == "atc" else ln.text
+                async for chunk, rate in self.svc.tts.stream(spoken.speak(said, ln.callsign), voice):
                     if self.playing != "chatter":
                         return
                     await self.send_audio(rs.process(chunk, rate), mark=False)
@@ -917,7 +918,9 @@ class Outgoing:
             if item is None:
                 return
             fac, sentence = item
-            text = spoken.speak(sentence, call.fs.callsign)
+            said = realism.humanize(sentence, call.fs.callsign, call.fs.aircraft_type,
+                                    slips=fac.kind != "CLD")  # (a clearance is long enough already)
+            text = spoken.speak(said, call.fs.callsign)
             voice = paced(resolve(call.fs.voice_for(fac)), fac.kind) if fac.voice else system_voice()
             await call.not_transmitting.wait()  # half duplex: wait for him to let go of the mic
             if stream is None:
