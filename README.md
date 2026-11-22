@@ -137,3 +137,12 @@ journalctl -u ai-atc --since "-5 min" --no-pager | tail -5
 ```bash
 git -C /root/AI-ATC-Phone pull -q && bash /root/AI-ATC-Phone/deploy/install.sh && sleep 20 && curl -s https://atc.smspilot.app/health
 ```
+
+## License
+
+MIT: free to use, change and share, including commercially, as long as you keep the copyright
+notice and credit the author. See `LICENSE`.
+
+Not for real-world navigation or flight training: this is a simulation for fun. Data sources keep
+their own terms: FAA procedure data (public domain), OpenStreetMap (© OpenStreetMap contributors, ODbL),
+OurAirports (public domain) and aviationweather.gov.
