@@ -20,6 +20,9 @@ Clearance → (Ramp) → Ground → Tower → Departure → Center(s) → Approa
 *"Teterboro Clearance, N123AB, at Atlantic, IFR to Boston"* starts you on Atlantic's ramp at
 Teterboro. Call Newark (or say nothing different) and you start at a Newark gate (`HOME_AIRPORT`).
 The aircraft type is optional: it's "on the flight plan", assumed from the airline if you don't say it.
+Say **VFR** instead of IFR (*"Newark Clearance, N123AB, Cessna 172, VFR to Morristown"*) to fly by
+sight with flight following: Class Bravo departure instructions, "maintain VFR", the airport pointed
+out to you, and a traffic pattern entry at the end. Small planes get speeds they can actually fly.
 
 Hang up mid-flight and call back within 2 hours to resume where you left off.
 
