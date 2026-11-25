@@ -350,4 +350,9 @@ def test_nov25_fixes():
     c = Controller(fs, db)
     assert c._maybe_move_departure("sullivan county international, this is flexjet 560, request ifr clearance to newark")
     assert fs.departure == "KMSV" and fs.facility.kind == "CLD" and "Clearance" not in fs.facility.name
-    assert not any("Army" in a["name"] for a in Controller(start_flight("t", db.get("KEWR")), db).nearest_suitable(10))
+    # military fields: only first when much closer, or when the emergency is urgent
+    c2 = Controller(start_flight("t", db.get("KEWR")), db)
+    calm = c2.nearest_suitable(10)
+    assert calm and not calm[0]["military"] or calm[0]["distance_nm"] < 20
+    c2.fs.emergency = {"what_he_said": "mayday we lost both engines"}
+    assert c2.URGENT.search(c2.fs.emergency["what_he_said"])

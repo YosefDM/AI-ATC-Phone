@@ -955,25 +955,42 @@ class Controller:
 
         return _interp(dep.lat, dep.lon, dest.lat, dest.lon, frac)
 
+    MILITARY = re.compile(r"\b(army|aaf|air force|afb|naval|nas|air national guard|joint base|air reserve|"
+                          r"marine corps|ang base)\b", re.I)
+    URGENT = re.compile(r"\b(both engines|dual engine|all engines|lost (?:all )?(?:thrust|power)|fire|smoke|fumes|"
+                        r"ditch|fuel (?:exhaustion|starvation)|out of fuel|structural|decompression|can'?t make)\b", re.I)
+
     def nearest_suitable(self, n: int = 4) -> list[dict]:
+        """Airports he could divert to, best first. Like real controllers: civil fields first; a military field only
+        when it's much closer, or when the emergency is urgent (engines out, fire, smoke), where the nearest
+        runway that fits wins, military or not."""
+        fs = self.fs
         lat, lon = self.approx_position()
-        out = []
+        urgent = bool(fs.emergency and self.URGENT.search(fs.emergency.get("what_he_said", "")))
+        cands = []
         for ap in self.db.by_ident.values():
             if ap.kind not in ("large_airport", "medium_airport") or not ap.runways:
                 continue
-            if re.search(r"\b(army|aaf|air force|afb|naval|nas|air national guard|joint base|air reserve|marine corps)\b",
-                         ap.name, re.I):
-                continue  # a civil jet goes to a civil field (not Phillips Army Airfield)
             if abs(ap.lat - lat) > 3 or abs(ap.lon - lon) > 4:
                 continue
             longest = max(ap.runways, key=lambda r: r.length_ft)
             if longest.length_ft < 6000:
                 continue
-            d = nm_between(lat, lon, ap.lat, ap.lon)
-            out.append((d, ap, longest))
-        out.sort(key=lambda x: x[0])
+            cands.append((nm_between(lat, lon, ap.lat, ap.lon), ap, longest, bool(self.MILITARY.search(ap.name))))
+        civil = sorted((c for c in cands if not c[3]), key=lambda c: c[0])
+        nearest_civil = civil[0][0] if civil else 1e9
+
+        def rank(c):
+            d, _, _, mil = c
+            if not mil or urgent:
+                return d
+            # not urgent: a civil field unless the nearest one is far away and the military field much closer
+            return d if (nearest_civil > 30 and d < nearest_civil * 0.4) else d + 1000
+
+        out = sorted(cands, key=rank)
         return [{"icao": ap.ident, "name": ap.spoken_name, "distance_nm": round(d), "longest_runway": r.ident,
-                 "runway_length_ft": r.length_ft, "towered": ap.towered} for d, ap, r in out[:n]]
+                 "runway_length_ft": r.length_ft, "towered": ap.towered, "military": mil}
+                for d, ap, r, mil in out[:n]]
 
     async def _maybe_divert(self, upd: dict) -> None:
         """He agreed on an airport to divert to: re-plan the rest of the flight to land there."""
