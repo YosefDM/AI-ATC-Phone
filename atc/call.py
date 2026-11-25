@@ -275,7 +275,8 @@ class CallSession:
         if self.playing == "atc":
             # ATC is already talking: keying up steps on it, so that reply is cut off. If it had been talking
             # a while, neither side got through (both transmitting at once): the controller says "blocked".
-            self.stepped_on = time.monotonic() - self.atc_talking_since > 1.0
+            left = self.mixer.remaining_s()
+            self.stepped_on = time.monotonic() - self.atc_talking_since > 1.0 and left > 1.2
             await self.cancel_work()
             await self.stop_playback()
         else:
@@ -358,6 +359,9 @@ class CallSession:
     def _stt_terms(self) -> list[str]:
         fs = self.fs
         terms = [fs.callsign or "", fs.facility.name]
+        if not fs.callsign:  # common airline callsigns, so "Cactus 1549" isn't heard as "KXN 1549"
+            terms += ["Cactus", "United", "Delta", "American", "JetBlue", "Southwest", "Speedbird", "Jazz",
+                      "Brickyard", "Republic", "Spirit", "Frontier", "Alaska", "Endeavor", "Envoy", "November"]
         if not fs.clearance_issued and not fs.callsign:
             terms += self._nearby_fields()  # he may be calling another airport's clearance to start there
         if fs.next_facility:
@@ -585,7 +589,9 @@ class CallSession:
                 seq[key] = ({"give_way_to": f"{cs} ({fleet.type_word(cs)}) crossing from your "
                                             f"{random.choice(['left', 'right'])}"} if r < 0.3 else
                             {"follow": f"{cs} ({fleet.type_word(cs)}) ahead of him on the same taxiway"} if r < 0.5 else {})
-            hint.update(seq[key])
+            said = " ".join(t.text.lower() for t in fs.history if t.who == "atc" and t.facility == fac.id)
+            if not ("give way" in said or "follow the" in said):
+                hint.update(seq[key])  # once: a controller doesn't repeat "give way" on every call
         departing = seq.get(f"{fac.id}:departed") or []
         if departing and fac.kind == "TWR" and fac.phase != "arr":
             ahead = departing[0]
@@ -870,6 +876,12 @@ class Mixer:
         self.queue.append(pcm.astype(np.int16))
         if mark:
             self.queue.append(("mark", mark))
+
+    def remaining_s(self) -> float:
+        """Seconds of queued audio he hasn't heard yet."""
+        n = (len(self.cur) - self.pos) if self.cur is not None else 0
+        n += sum(len(x) for x in self.queue if not isinstance(x, tuple))
+        return n / PHONE_RATE
 
     def clear(self) -> None:
         self.queue.clear()

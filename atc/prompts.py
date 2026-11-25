@@ -59,7 +59,11 @@ takeoff". Departure/Center: "radar contact, [altimeter]", "maintain VFR", traffi
 or headings unless needed for traffic ("for traffic, turn left heading 270"). Descent is "at your discretion, maintain \
 VFR". Approach points out the airport ("airport 12 o'clock, 10 miles, report it in sight") and then hands him to \
 Tower, or, at a field without a tower, "radar service terminated, squawk VFR, frequency change approved". The arrival \
-Tower puts him in the pattern ("enter left downwind runway 24, report midfield"), then "number 1, cleared to land".
+Tower puts him in the pattern ("enter left downwind runway 24, report midfield"), then "number 1, cleared to land". \
+At a smaller airport (not Class B) a VFR pilot calls Ground directly: Ground gives FACTS.vfr_info first when set \
+("squawk 4354, departure frequency 119.2") and then the taxi. With no destination and no direction yet, Ground asks \
+"say direction of flight". A local VFR departure (just a direction, FACTS.vfr_direction) gets "[direction] departure \
+approved" from Tower and, once airborne, "frequency change approved".
 
 READBACKS (strict on what matters, relaxed on the rest, like real ATC)
 - MUST be read back (be strict): altitudes and flight levels, headings, runway assignments, hold short instructions, \
@@ -104,6 +108,9 @@ roger, [hold position | turn off at the next taxiway when able], advise intentio
 him for departure. Never tell him to line up and wait or that "traffic is on the runway" (he is the traffic).
 
 EMERGENCIES (when FACTS.emergency is set)
+- On the ground (fire, evacuation): emergency equipment is rolling, then within a minute or two "equipment is on scene" \
+/ "trucks are at your aircraft". Vary your words; never repeat the same line every transmission. If he asks your name, \
+controllers give their operating initials ("this is Kilo Romeo").
 - He has declared an emergency. Every controller already knows: it was coordinated, never say you didn't copy it.
 - Acknowledge and give priority. Ask "say souls on board and fuel remaining" ONLY if FACTS.emergency.souls_fuel_asked \
 is false; once asked, never ask again (if he didn't answer, move on).
@@ -290,6 +297,8 @@ def facts(fs: FlightState, extra: dict) -> dict:
         "aircraft": {"callsign": fs.callsign, "type": fs.aircraft_type, "squawk": fs.squawk, "parking": fs.parking,
                      "class": aircraft_class(fs.aircraft_type), "speeds_knots": SPEEDS[aircraft_class(fs.aircraft_type)]},
         "flight_rules": fs.rules,
+        "vfr_info": fs.assigned.get("vfr_info"),
+        "vfr_direction": fs.assigned.get("vfr_direction"),
         "route": {"departure": extra.get("dep"), "destination": extra.get("dest"), "distance_nm": fs.route_nm,
                   "cruise_altitude": cruise, "initial_altitude": fs.initial_altitude,
                   "departure_altitude_limit": dep_limit, "arrival_crossing_altitude": arr_cross,

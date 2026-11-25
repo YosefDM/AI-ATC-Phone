@@ -157,9 +157,12 @@ class Route:
 
     def out_phrase(self, steps: list[str] | None = None) -> str:
         steps = self.steps if steps is None else steps
-        rwy = f"runway {self.runway} at {self.at}" if self.at else f"runway {self.runway}"
-        if self.at and steps and steps[-1] == self.at:
+        at = self.at if self.at and len(steps) > 1 else ""  # "at P, taxi" alone sounds wrong: "taxi via P"
+        rwy = f"runway {self.runway} at {at}" if at else f"runway {self.runway}"
+        if at and steps and steps[-1] == at:
             steps = steps[:-1]  # "runway 22R at W, taxi via B, R" (W is implied)
+        if steps and steps[0].startswith("cross"):  # no named taxiway before the crossing
+            return f"{rwy}, taxi, {', '.join(steps)}"
         return f"{rwy}, taxi via {', '.join(steps)}" if steps else f"{rwy}, taxi"
 
     def in_phrase(self, gate_words: str) -> str:

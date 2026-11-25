@@ -211,6 +211,21 @@ def vfr_altitude(dist_nm: float, course: float, klass: str, requested: int | Non
     return thousands * 1000 + 500
 
 
+def plan_local_vfr(fs: "FlightState", dep: Airport, dep_wx: Weather) -> None:
+    """VFR with no destination ("northwest departure"): Ground and Tower, then he's on his own."""
+    drw = active_runway(dep, dep_wx, "dep")
+    fs.dep_runway = drw.ident if drw else None
+    facs = [fs.facilities[0]] if fs.facilities else []
+    for kind in ("GND", "TWR"):
+        f = _airport_facility(dep, kind, "dep")
+        if f and all(x.id != f.id for x in facs):
+            facs.append(f)
+    for i, f in enumerate(facs):
+        if not f.voice:
+            f.voice = voice_for_slot(i, fs.voice_offset).to_dict()
+    fs.facilities = facs
+
+
 def new_squawk() -> str:
     while True:
         code = f"{random.randint(1, 6)}{random.randint(0, 7)}{random.randint(0, 7)}{random.randint(0, 7)}"
@@ -277,6 +292,8 @@ def build_plan(fs: FlightState, db: AirportDB, dep: Airport, dest: Airport, dep_
     if first:
         facs.append(first)
     for kind in ("CLD", "GND", "TWR"):
+        if kind == "CLD" and first is not None and first.kind == "GND":
+            continue  # a VFR departure that started with Ground has no clearance step
         if kind == "GND":
             # an airline's own ramp control handles the pushback and the gate area first (e.g. United at Newark)
             for airline, (rname, rfreq) in dep.override.get("airline_ramp", {}).items():

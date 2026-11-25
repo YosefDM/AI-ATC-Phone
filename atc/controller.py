@@ -73,6 +73,74 @@ class Controller:
 
     # ------------------------------------------------------------ context
 
+    def _maybe_fix_callsign(self, text: str) -> None:
+        """Speech recognition heard 'KXN 1549' once, but he keeps saying 'Cactus 1549': go with what he says."""
+        fs = self.fs
+        if not fs.callsign:
+            return
+        digits = _digits_in(fs.callsign)
+        if len(digits) < 2:
+            return
+        names = "|".join(sorted((re.escape(a) for a in spoken.AIRLINES), key=len, reverse=True))
+        m = re.search(rf"\b({names})\s+{re.escape(digits)}\b", text, re.I)
+        if not m or fs.callsign.lower().startswith(m.group(1).lower()):
+            return
+        votes = fs.assigned.setdefault("callsign_votes", {})
+        said = f"{m.group(1).title()} {digits}"
+        votes[said] = votes.get(said, 0) + 1
+        if votes[said] >= 2:
+            log.info("callsign corrected: %s -> %s", fs.callsign, said)
+            fs.callsign = said
+            votes.clear()
+
+    def _sounds_like_airport(self, name: str, here):
+        """Closest-sounding towered airport within 150 nm (speech recognition misspells place names)."""
+        import difflib
+
+        best, score = None, 0.0
+        for a in self.db.by_ident.values():
+            if not a.towered or nm_between(here.lat, here.lon, a.lat, a.lon) > 150:
+                continue
+            r = difflib.SequenceMatcher(None, name, a.radio_name.lower()).ratio()
+            if r > score:
+                best, score = a, r
+        return best if score >= 0.75 else None
+
+    def _vfr_ground_start(self, low: str) -> None:
+        """VFR at a Class C/D field: no clearance step. He calls Ground; Ground gives the squawk (if he wants
+        flight following) and the taxi. With no destination, just a direction, it's a local departure."""
+        from .flight import CLASS_B, _airport_facility, plan_local_vfr
+
+        fs = self.fs
+        if fs.rules != "VFR" or fs.clearance_issued or fs.idx != 0 or self.dep.ident in CLASS_B:
+            return
+        if fs.facility.kind == "CLD":
+            gnd = _airport_facility(self.dep, "GND", "dep") or _airport_facility(self.dep, "TWR", "dep")
+            if gnd:
+                gnd.voice = fs.facility.voice
+                fs.facilities = [gnd]
+        m = re.search(r"\b(north|south|east|west|northeast|northwest|southeast|southwest)(?:bound| departure|ern)?\b", low)
+        if m and not fs.destination:
+            fs.assigned["vfr_direction"] = m.group(1)
+
+    async def _vfr_ground_plan(self) -> None:
+        """Plan a VFR departure from Ground: a squawk and Departure's frequency for flight following when he
+        has a destination; just Ground and Tower for a local departure in a direction."""
+        from .flight import plan_local_vfr
+
+        fs = self.fs
+        dep = self.dep
+        dep_wx = await get_weather(dep)
+        if fs.destination:
+            dest = self.dest
+            build_plan(fs, self.db, dep, dest, dep_wx, await get_weather(dest))
+            nxt = next((f for f in fs.facilities if f.kind in ("DEP", "APP", "CTR")), None)
+            fs.assigned["vfr_info"] = f"squawk {fs.squawk}" + (f", departure frequency {nxt.freq}" if nxt else "")
+            fs.clearance_issued = True
+        elif fs.assigned.get("vfr_direction"):
+            plan_local_vfr(fs, dep, dep_wx)
+            fs.clearance_issued = True
+
     def _maybe_move_departure(self, low: str) -> bool:
         """His first call names the airport he's at ("Teterboro Clearance, N123AB, at Signature..."):
         the flight starts there, like a real pilot who simply calls that airport's controller."""
@@ -88,11 +156,11 @@ class Controller:
         if name in (here.radio_name.lower(), here.spoken_name.lower(), here.ident.lower()):
             return False
         ap = self.db.search(name, near=(here.lat, here.lon))
-        if not ap or ap.ident == here.ident or not ap.towered:
+        hay = f"{ap.name} {ap.municipality} {ap.radio_name} {ap.ident}".lower() if ap else ""
+        if not ap or not ap.towered or not all(w in hay for w in re.findall(r"[a-z]+", name)):
+            ap = self._sounds_like_airport(name, here)  # "Coldwell" is Caldwell, "Peterborough" is Teterboro
+        if not ap or ap.ident == here.ident:
             return False
-        hay = f"{ap.name} {ap.municipality} {ap.radio_name} {ap.ident}".lower()
-        if not all(w in hay for w in re.findall(r"[a-z]+", name)):
-            return False  # only a clear match: a misheard word shouldn't fly him out of the wrong airport
         from .flight import departure_facilities
 
         voices = [f.voice for f in fs.facilities]
@@ -134,7 +202,9 @@ class Controller:
         key = duty_key(fs.facility)
         out: dict = {}
         sid = fs.assigned.get("sid")
-        if key == "TWR_dep" and fs.dep_runway and fs.rules == "VFR" and self.dest:
+        if key == "TWR_dep" and fs.rules == "VFR" and fs.assigned.get("vfr_direction") and not self.dest:
+            out["takeoff_instruction"] = f"{fs.assigned['vfr_direction']} departure approved"
+        elif key == "TWR_dep" and fs.dep_runway and fs.rules == "VFR" and self.dest:
             from .data.airports import bearing
 
             m = re.match(r"(\d{1,2})", fs.dep_runway)
@@ -384,6 +454,9 @@ class Controller:
                 return f"he has it in sight: 'contact {nxt.name} {nxt.freq}' (handoff=true)."
             return ("'radar service terminated, squawk VFR, change to advisory frequency approved' and "
                     "flight_complete=true.")
+        if key == "TWR_dep" and not nxt and self._said_here(r"cleared for take ?off"):
+            return ("he's airborne and leaving your airspace: '[callsign], frequency change approved, good day' "
+                    "and flight_complete=true.")
         if key == "TWR_arr" and not self._said_here(r"cleared to land"):
             if not self._said_here(r"downwind|base|straight.in"):
                 side = random.choice(["left", "right"])
@@ -442,6 +515,7 @@ class Controller:
             await self._say(speak, f"{cs}, say again." if cs else f"Station calling {fs.facility.name}, say again.", record=False)
             return
 
+        self._maybe_fix_callsign(text)
         if self._maybe_move_departure(low):
             log.info("flight moved: departing %s", fs.departure)
 
@@ -504,6 +578,9 @@ class Controller:
                 fs.rules = "VFR"
             elif re.search(r"\bi\.? ?f\.? ?r\b", low):
                 fs.rules = "IFR"
+            self._vfr_ground_start(low)
+            if fs.rules == "VFR" and fs.facility.kind == "GND":
+                await self._vfr_ground_plan()
         number_check = None
         ref = fs.readback_ref or fs.last_atc_text
         if ref and (fs.expects_reply or fs.handoff_pending or fs.pending_readback):
@@ -517,6 +594,14 @@ class Controller:
             if req:
                 number_check = {"required_numbers": req, "missing_or_wrong": missing}
         self._number_check = number_check
+        if (fs.facility.kind == "CLD" and fs.clearance_issued and fs.pending_readback and number_check
+                and len(number_check["missing_or_wrong"]) == len(number_check["required_numbers"])
+                and not re.search(r"\bsay again\b|\brepeat\b|\bunable\b|\bstand ?by\b", low)):
+            # "thank you, good day" is not a readback: a real controller never lets the clearance go unread back
+            fs.add_turn("pilot", text)
+            fs.expects_reply = True
+            await self._say(speak, f"{fs.callsign}, read back the clearance." if fs.callsign else "Read back the clearance.")
+            return
         rep_alt = reported_altitude(text)
         if rep_alt:
             fs.assigned["reported_altitude"] = rep_alt  # where he says he is ("with you at 13,000")
@@ -871,6 +956,9 @@ class Controller:
         log.info("diverting to %s; next: %s", ap.ident, [f.name for f in chain])
 
     def _resolve_destination(self, said: str):
+        if re.fullmatch(r"(?:the )?(?:north|south|east|west|northeast|northwest|southeast|southwest)(?:[ -]?(?:bound|ern))?"
+                        r"(?: departure)?", re.sub(r"[^a-z -]", "", said.lower()).strip()):
+            return None  # "out to the northwest" is a direction, not Northwest Florida Beaches
         alias = CITY_ALIASES.get(re.sub(r"[^a-z ]", "", said.lower()).strip())
         return self.db.get(alias) if alias else self.db.search(said, near=(self.dep.lat, self.dep.lon))
 
@@ -948,8 +1036,8 @@ class Controller:
             ap = self._resolve_destination(upd["destination"])
             if ap and ap.ident != fs.departure:
                 fs.destination = ap.ident
-            elif not fs.destination:
-                fs.assigned["unresolved_destination"] = upd["destination"]
+            elif not fs.destination and not re.search(r"\b(north|south|east|west)", upd["destination"], re.I):
+                fs.assigned["unresolved_destination"] = upd["destination"]  # a direction just gets "say destination"
         if upd.get("taxi_route"):
             fs.assigned["taxi_route"] = upd["taxi_route"]
 

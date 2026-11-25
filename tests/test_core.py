@@ -312,3 +312,23 @@ def test_vfr_altitudes_and_speeds():
     assert vfr_altitude(50, 270, "piston", None) % 2000 == 500  # westbound: even thousands + 500
     assert vfr_altitude(500, 90, "piston", 15000) <= 9500
     assert SPEEDS["piston"]["max_assignable"] < 170
+
+
+def test_latest_call_fixes():
+    from atc.controller import Controller
+    from atc.data.airports import get_db
+    from atc.data.taxi import Route
+    from atc.flight import start_flight
+
+    db = get_db()
+    fs = start_flight("t", db.get("KEWR"))
+    c = Controller(fs, db)
+    assert c._resolve_destination("the northwest") is None  # not Northwest Florida Beaches
+    assert c._maybe_move_departure("coldwell ground, n123ab, vfr northwest departure")  # misheard Caldwell
+    assert fs.departure == "KCDW"
+    assert Route("5", steps=["cross runway 13"]).out_phrase() == "runway 5, taxi, cross runway 13"
+    assert Route("4", steps=["P"], at="P").out_phrase() == "runway 4, taxi via P"
+    fs.callsign = "KXN 1549"
+    c._maybe_fix_callsign("Cactus 1549, say again")
+    c._maybe_fix_callsign("Cactus 1549, ready to copy")
+    assert fs.callsign == "Cactus 1549"
