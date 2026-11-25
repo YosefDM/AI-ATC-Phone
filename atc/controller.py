@@ -28,6 +28,7 @@ from .speech.tts import voice_for_slot
 log = logging.getLogger(__name__)
 
 NO_RESPONSE_AFTER_S = 20.0
+TAXI_ISSUED = r"\btaxi (?:via|to runway|runway)\b|runway \w+(?: at \w+)?, taxi\b|\btaxi\b.{0,40}\bvia\b"
 PROGRESS_DELAY_S = {"RMP_dep": 25.0, "GND_dep": 25.0, "TWR_dep": 18.0, "DEP": 30.0, "CTR": 40.0, "APP": 30.0, "TWR_arr": 22.0}
 MAX_PROGRESS_NUDGES = 5
 
@@ -99,9 +100,12 @@ class Controller:
 
         best, score = None, 0.0
         for a in self.db.by_ident.values():
-            if not a.towered or nm_between(here.lat, here.lon, a.lat, a.lon) > 150:
+            if a.kind not in ("large_airport", "medium_airport") and not a.towered:
                 continue
-            r = difflib.SequenceMatcher(None, name, a.radio_name.lower()).ratio()
+            if nm_between(here.lat, here.lon, a.lat, a.lon) > 150:
+                continue
+            r = max(difflib.SequenceMatcher(None, name, a.radio_name.lower()).ratio(),
+                    difflib.SequenceMatcher(None, name, a.name.lower().replace(" airport", "")).ratio())
             if r > score:
                 best, score = a, r
         return best if score >= 0.75 else None
@@ -109,7 +113,7 @@ class Controller:
     def _vfr_ground_start(self, low: str) -> None:
         """VFR at a Class C/D field: no clearance step. He calls Ground; Ground gives the squawk (if he wants
         flight following) and the taxi. With no destination, just a direction, it's a local departure."""
-        from .flight import CLASS_B, _airport_facility, plan_local_vfr
+        from .flight import CLASS_B, _airport_facility
 
         fs = self.fs
         if fs.rules != "VFR" or fs.clearance_issued or fs.idx != 0 or self.dep.ident in CLASS_B:
@@ -150,14 +154,20 @@ class Controller:
         m = re.match(r"\W*(?:hello,?\s+|hi,?\s+|good \w+,?\s+)?([a-z][a-z' .-]{1,40}?)\s+"
                      r"(?:clearance|delivery|ground|tower|ramp)\b", low)
         if not m:
+            # at a field without a tower he just says where he is: "Sullivan County International, Flexjet 560..."
+            # or "..., on the ground at Sullivan County, ..."
+            m = (re.match(r"\W*([a-z][a-z' .-]{2,40}?\b(?:international|regional|county|municipal|airport))\b", low)
+                 or re.search(r"\bon the ground at\s+([a-z][a-z' .-]{2,40}?)(?=[,.]|\s+(?:ifr|vfr|request|with)\b|$)", low))
+        if not m:
             return False
-        name = m.group(1).strip(" .")
+        name = re.sub(r"\b(international|regional|municipal|airport)\b", "", m.group(1)).strip(" .")
         here = self.dep
         if name in (here.radio_name.lower(), here.spoken_name.lower(), here.ident.lower()):
             return False
         ap = self.db.search(name, near=(here.lat, here.lon))
         hay = f"{ap.name} {ap.municipality} {ap.radio_name} {ap.ident}".lower() if ap else ""
-        if not ap or not ap.towered or not all(w in hay for w in re.findall(r"[a-z]+", name)):
+        words = [w for w in re.findall(r"[a-z]+", name) if w not in ("international", "airport", "regional", "county")]
+        if not ap or not words or not all(w in hay for w in words):
             ap = self._sounds_like_airport(name, here)  # "Coldwell" is Caldwell, "Peterborough" is Teterboro
         if not ap or ap.ident == here.ident:
             return False
@@ -166,6 +176,13 @@ class Controller:
         voices = [f.voice for f in fs.facilities]
         fs.departure = ap.ident
         fs.facilities = departure_facilities(ap)
+        if not ap.towered:
+            # no tower: the IFR clearance comes from the radar facility above it (as in real life)
+            from .flight import _radar_facility
+
+            radar = _radar_facility(self.db, ap, "DEP", "dep")
+            if radar:
+                fs.facilities = [Facility(f"{ap.ident}-CLD-dep", "CLD", radar.name, radar.freq, ap.ident, "dep")]
         for f, v in zip(fs.facilities, voices):
             f.voice = v
         prefetch(ap)
@@ -337,9 +354,11 @@ class Controller:
         if fs.expects_reply and fs.no_response_count < 2:
             return "no_response", fs.last_activity + NO_RESPONSE_AFTER_S
         key = duty_key(fs.facility)
+        if key == "TWR_dep" and fs.assigned.get("queue", 1) > 1 and not self._said_here(r"line up|cleared for take"):
+            return "progress", fs.last_activity + 14.0  # the line moves: the next aircraft ahead departs
         if key == "TWR_dep" and fs.assigned.get("monitoring") and not self._said_here(r"line up|cleared for take"):
             return "progress", fs.last_activity + 10.0  # he's monitoring: Tower calls him when it's his turn
-        if key == "GND_dep" and not self._said_here(r"\btaxi via\b|\btaxi to runway\b|runway \w+, taxi\b"):
+        if key == "GND_dep" and not self._said_here(TAXI_ISSUED):
             return None  # pushed back, not taxiing yet: it's his turn to call ready to taxi
         if key in PROGRESS_DELAY_S and fs.exchanges >= 1 and fs.progress_nudges < MAX_PROGRESS_NUDGES and not fs.expects_reply:
             return "progress", fs.last_activity + PROGRESS_DELAY_S[key]
@@ -372,15 +391,11 @@ class Controller:
         nxt = fs.next_facility
         handoff = f"hand him off to {nxt.name} {nxt.freq} (handoff=true)." if nxt else "finish up."
         if key == "GND_dep":
-            issued = self._said_here(r"\btaxi via\b|\btaxi to runway\b|runway \w+, taxi\b")
+            issued = self._said_here(TAXI_ISSUED)
             return handoff if issued else "wait for him to call ready to taxi, then issue his taxi clearance (runway, route)."
         if key == "TWR_dep":
             if self._said_here(r"cleared for takeoff"):
                 return handoff
-            q = fs.assigned.get("queue", 1)
-            if q > 1 and not fs.assigned.get("monitoring"):
-                return (f"he's waiting at the runway, now number {q} for departure: tell him ('[callsign], number {q}, "
-                        "hold short runway [x]') or, if you already did, say nothing (action=silent).")
             if fs.assigned.get("monitoring") and not self._said_here(r"line up and wait"):
                 return ("he is monitoring your frequency and will not call you: call him first, 'Newark Tower, hello', "
                         "and line him up ('line up and wait').")
@@ -578,6 +593,9 @@ class Controller:
                 fs.rules = "VFR"
             elif re.search(r"\bi\.? ?f\.? ?r\b", low):
                 fs.rules = "IFR"
+            elif (fs.idx == 0 and re.match(r"\W*[a-z' .-]{2,40}\bground\b", low)
+                  and re.search(r"\b(north|south|east|west)\w*\b.{0,15}\bdeparture\b|\bdeparture to the\b", low)):
+                fs.rules = "VFR"  # "Caldwell Ground, ... request taxi, northwest departure": that's a VFR pilot
             self._vfr_ground_start(low)
             if fs.rules == "VFR" and fs.facility.kind == "GND":
                 await self._vfr_ground_plan()
@@ -622,13 +640,20 @@ class Controller:
         else:
             fs.progress_nudges += 1
             key = duty_key(fs.facility)
+            if key == "TWR_dep" and fs.next_facility is None and self._said_here(r"cleared for take ?off"):
+                # a local VFR departure leaving the airspace: the formula, then he's on his own
+                fs.complete = True
+                self.touch()
+                await self._say(speak, f"{fs.callsign}, frequency change approved, good day.")
+                return
             q = fs.assigned.get("queue", 1)
             if key == "TWR_dep" and q > 1 and not self._said_here(r"line up|cleared for take"):
-                # the departure line moves up; while he's just monitoring, Tower has nothing to say to him yet
-                fs.assigned["queue"] = q = max(1, q - random.randint(1, 2))
-                if fs.assigned.get("monitoring") and q > 1:
-                    self.touch()
-                    return
+                # the line moves up: the aircraft ahead of him is cleared for takeoff on frequency (he hears it),
+                # and Tower has nothing to say to him yet
+                fs.assigned["queue"] = q - 1
+                fs.assigned["departure_ahead"] = True
+                self.touch()
+                return
             note = ("[TIME PASSES: a few minutes go by with no transmissions; the flight has progressed. "
                     f"Your next step: {self.progress_hint()}]")
         self.touch()
@@ -675,6 +700,10 @@ class Controller:
                         # nothing said yet: ask the model again (below) with the reason spelled out
                         state["mode"], state["blocked"] = "blocked", why
                     return  # otherwise just leave that sentence out
+                if re.search(r"\bGround point \d", s):
+                    s = re.sub(r",?\s*contact [\w ]*Ground \d{3}\.\d+", "", s)  # "Ground point 8" already says it
+                if fac.kind == "DEP" and fs.idx > 0 and fs.facilities[fs.idx - 1].kind == "DEP":
+                    s = re.sub(r",?\s*radar contact\b,?", ",", s, flags=re.I).replace(",,", ",")  # already identified
                 state["spoken"].append(s)
                 await speak(fac, s)
 
@@ -723,6 +752,14 @@ class Controller:
                 fs.readback_failures = max(0, fs.readback_failures - 1)  # don't count it twice
             self._number_check = None  # the retry is told explicitly
             result = await self.brain.respond(messages, on_decision, on_sentence)
+            if state["mode"] == "silent" and rb == "incorrect" and fs.readback_ref and not state.get("advanced"):
+                # still nothing: a wrong readback always gets corrected, so repeat the instruction
+                again = re.sub(rf"^\s*{re.escape(fs.callsign or '')},?\s*(?:[A-Z][\w ]+ (?:Ground|Tower|Clearance),\s*)?",
+                               "", fs.readback_ref)
+                state = {"mode": "speak", "spoken": [], "handoff": False}
+                text_ = f"{fs.callsign}, negative, {again[0].lower() + again[1:] if again else ''}".rstrip(", ")
+                state["spoken"] = [text_]
+                await speak(fac, text_)
         items = result.get("readback_items") or []
         if items and state["mode"] == "speak" and not state.get("handoff"):
             fs.pending_readback = items
@@ -740,10 +777,14 @@ class Controller:
         elif state["mode"] == "speak" and not state["spoken"] and not state.get("handoff"):
             # model gave nothing usable
             say = (result.get("say") or "").strip()
-            if not say:
+            if not say and (rb == "correct" or (pilot and _is_ack(event_text))):
+                state["mode"] = "silent"  # he read it back fine: a controller says nothing, never "say again"
+                say = None
+            elif not say:
                 say = f"{fs.callsign}, say again." if fs.callsign else f"Station calling {fac.name}, say again."
-            state["spoken"] = [say]
-            await speak(fac, say)
+            if say:
+                state["spoken"] = [say]
+                await speak(fac, say)
 
         # a handoff that forgot the frequency gets it appended, so the pilot can't get lost
         if state["handoff"] and fs.next_facility and state["mode"] == "speak":
@@ -768,6 +809,11 @@ class Controller:
                 # after a correction ("negative, squawk 4441") he only needs to read back the corrected item,
                 # so his next readback is checked against the correction, not the whole original clearance
                 fs.readback_ref = full
+            if fs.emergency and extra.get("nearest_airports"):
+                for a in extra["nearest_airports"]:
+                    if a["name"].lower() in full.lower() and a["icao"] != fs.emergency.get("divert_to"):
+                        await self._maybe_divert({"divert_to": a["icao"]})  # what he was told is where he goes
+                        break
             if fs.emergency and re.search(r"souls on board|fuel remaining", full, re.I):
                 fs.emergency["souls_fuel_asked"] = True
             nf = fs.next_facility
@@ -795,6 +841,10 @@ class Controller:
         if fs.callsign and re.search(r"\bsay again (?:your |full )?call ?sign\b", low) and pilot_text:
             if _digits_in(fs.callsign) and _digits_in(fs.callsign) in _digits_in(pilot_text):
                 return f"His callsign was clear ({fs.callsign}); don't ask for it again."
+        if (re.search(r"\bcontact (?:new york |\w+ )?departure\b", low) and fs.next_facility is None
+                and fs.facility.phase == "dep"):
+            return ("There is no departure controller for this flight (local VFR): say '[callsign], frequency change "
+                    "approved' instead.")
         mine = _digits_in(self.fs.facility.freq)
         if re.search(r"\bcontact\b", low) and mine and mine in _digits_in(sentence) and fs.next_facility \
                 and _digits_in(fs.next_facility.freq) != mine:
@@ -852,7 +902,13 @@ class Controller:
         # Clearance Delivery's answer to a good readback is formulaic: code says it
         if (fac.kind == "CLD" and fs.clearance_issued and pilot and readback == "correct" and routine_ok
                 and not fs.handoff_pending and nxt):
-            self._template(state, f"{cs}, readback correct. Contact {nxt.name} {nxt.freq} when ready to taxi.")
+            if not self.dep.towered:
+                now = time.gmtime()
+                void = time.gmtime(time.time() + 15 * 60)
+                self._template(state, f"{cs}, readback correct. Clearance void if not off by {time.strftime('%H%M', void)}, "
+                                      f"time now {time.strftime('%H%M', now)}. Contact {nxt.name} {nxt.freq} airborne.")
+            else:
+                self._template(state, f"{cs}, readback correct. Contact {nxt.name} {nxt.freq} when ready to taxi.")
             return
         # model flagged a handoff but forgot to say it
         if (d.get("handoff") and action == "silent" and nxt and not fs.handoff_pending and readback != "incorrect"
@@ -905,6 +961,9 @@ class Controller:
         for ap in self.db.by_ident.values():
             if ap.kind not in ("large_airport", "medium_airport") or not ap.runways:
                 continue
+            if re.search(r"\b(army|aaf|air force|afb|naval|nas|air national guard|joint base|air reserve|marine corps)\b",
+                         ap.name, re.I):
+                continue  # a civil jet goes to a civil field (not Phillips Army Airfield)
             if abs(ap.lat - lat) > 3 or abs(ap.lon - lon) > 4:
                 continue
             longest = max(ap.runways, key=lambda r: r.length_ft)
@@ -920,11 +979,11 @@ class Controller:
         """He agreed on an airport to divert to: re-plan the rest of the flight to land there."""
         fs = self.fs
         want = upd.get("divert_to")
-        if not want or not fs.emergency or fs.emergency.get("divert_to"):
+        if not want or not fs.emergency:
             return
         here = self.approx_position()
         ap = self.db.search(want, near=here)
-        if not ap:
+        if not ap or ap.ident == fs.emergency.get("divert_to"):
             return
         wx = await get_weather(ap)
         from .data.weather import active_runway, approach_for

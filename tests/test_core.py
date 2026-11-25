@@ -332,3 +332,22 @@ def test_latest_call_fixes():
     c._maybe_fix_callsign("Cactus 1549, say again")
     c._maybe_fix_callsign("Cactus 1549, ready to copy")
     assert fs.callsign == "Cactus 1549"
+
+
+def test_nov25_fixes():
+    import re
+
+    from atc import realism
+    from atc.controller import TAXI_ISSUED, Controller
+    from atc.data.airports import get_db
+    from atc.flight import start_flight
+
+    assert re.search(TAXI_ISSUED, "Taxi runway 4L via B, N, altimeter 30.59", re.I)  # Ground got stuck on this
+    assert "FL360" in realism.humanize("Cactus 1549, climb and maintain 36000.", None, None, slips=False)
+    assert "13000" in realism.humanize("Cactus 1549, climb and maintain 13000.", None, None, slips=False)
+    db = get_db()
+    fs = start_flight("t", db.get("KEWR"))
+    c = Controller(fs, db)
+    assert c._maybe_move_departure("sullivan county international, this is flexjet 560, request ifr clearance to newark")
+    assert fs.departure == "KMSV" and fs.facility.kind == "CLD" and "Clearance" not in fs.facility.name
+    assert not any("Army" in a["name"] for a in Controller(start_flight("t", db.get("KEWR")), db).nearest_suitable(10))

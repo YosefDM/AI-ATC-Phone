@@ -62,6 +62,9 @@ def humanize(sentence: str, callsign: str | None, aircraft_type: str | None, rng
              slips: bool = True) -> str:
     rng = rng or random.Random()
     s = sentence
+    # "climb and maintain 36000" is said "flight level 360" above 18,000
+    s = re.sub(r"\b(maintain|climb to|descend to|at)\s+([1-4]\d)[,]?000\b",
+               lambda m: f"{m.group(1)} FL{m.group(2)}0" if int(m.group(2)) >= 18 else m.group(0), s)
     if callsign and is_heavy(aircraft_type) and "heavy" not in s.lower():
         s = re.sub(rf"\b{re.escape(callsign)}\b", f"{callsign} Heavy", s, count=1)
     # final-controller shorthand: "Tower 18.7" -> "Tower one eight seven" (never a full frequency)

@@ -462,6 +462,8 @@ class CallSession:
         except Exception:
             log.exception("controller event failed")
         await out.finish()
+        if self.fs.assigned.pop("departure_ahead", False):
+            await self._departure_ahead()
         if out.started:
             self.last_atc_to_him = time.time()
         await self._after_turn()
@@ -575,8 +577,9 @@ class CallSession:
     def traffic_hint(self) -> dict | None:
         """What his controller should know about the chatter traffic around him (sequence, runway)."""
         fs = self.fs
-        if not fs or self.effective_chatter in ("off", "sparse") or fs.facility.kind not in ("GND", "TWR", "APP"):
-            return None
+        if (not fs or fs.emergency or self.effective_chatter in ("off", "sparse")
+                or fs.facility.kind not in ("GND", "TWR", "APP")):
+            return None  # (during an emergency nobody makes him follow a 737)
         fac, seq = fs.facility, self.chatter_seq
         hint = {}
         others = [c for c in self.callsign_pool if c != fs.callsign]
@@ -625,6 +628,11 @@ class CallSession:
         self._schedule_chatter()
         if not lines:
             return
+        await self._play_lines(lines)
+
+    async def _play_lines(self, lines) -> None:
+        if not lines:
+            return
         fac = self.fs.facility
         atc_voice = paced(resolve(self.fs.voice_for(fac)), fac.kind) if fac.voice else system_voice()
         atc_prof = radio.profile_for(fac.id, fac.kind)
@@ -664,6 +672,22 @@ class CallSession:
             log.exception("chatter failed")
             if self.playing == "chatter":
                 self.playing = None
+
+    async def _departure_ahead(self) -> None:
+        """The aircraft ahead of him in line is cleared for takeoff, on frequency, before he goes."""
+        fs = self.fs
+        cs = random.choice([c for c in self.callsign_pool if c != fs.callsign] or ["Republic 4512", "JetBlue 1180",
+                                                                                   "Delta 2286", "N731PG"])
+        rwy = fs.dep_runway or ""
+        try:
+            ap, wx = await self.ctl.atis_airport()
+            wind = "wind calm" if wx.wind_speed < 3 else f"wind {wx.wind_dir or 0:03d} at {wx.wind_speed}"
+        except Exception:  # noqa: BLE001
+            wind = "wind calm"
+        lines = [chatter.Line("atc", f"{cs}, {wind}, runway {rwy}, cleared for takeoff.", cs),
+                 chatter.Line("pilot", f"Cleared for takeoff runway {rwy}, {cs}.", cs,
+                              random.choice(chatter.PILOT_VOICES))]
+        await self._play_lines(lines)
 
     async def _blocked_pair(self, ln, prof, voice, atc_prof, atc_voice) -> None:
         """Two other aircraft transmit at once: a squeal over both, then the controller: 'Blocked.'"""
