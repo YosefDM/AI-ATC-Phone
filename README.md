@@ -22,7 +22,11 @@ Teterboro. Call Newark (or say nothing different) and you start at a Newark gate
 The aircraft type is optional: it's "on the flight plan", assumed from the airline if you don't say it.
 Say **VFR** instead of IFR (*"Newark Clearance, N123AB, Cessna 172, VFR to Morristown"*) to fly by
 sight with flight following: Class Bravo departure instructions, "maintain VFR", the airport pointed
-out to you, and a traffic pattern entry at the end. Small planes get speeds they can actually fly.
+out to you, and a traffic pattern entry at the end. At smaller (non Class B) airports a VFR pilot
+calls Ground directly (*"Caldwell Ground, N123AB, at ramp Juliet, northwest departure"*); with just
+a direction it's a local flight that ends with "frequency change approved". Airports without a tower
+work too: the IFR clearance comes from the radar facility above, with a void time. Small planes get
+speeds they can actually fly.
 
 Hang up mid-flight and call back within 2 hours to resume where you left off.
 
@@ -40,13 +44,16 @@ Hang up mid-flight and call back within 2 hours to resume where you left off.
   Tower" (Tower then calls you), United Ramp for pushback, two departure sectors, "cross runway 22R
   at November, Ground point 8", terse final controllers, real lingo, "Heavy" on wide-bodies, and the
   occasional misspoken number corrected on the spot (only the speech changes, never the facts).
-- **Things that happen in real life:** a line for the runway at busy airports, "stand by" on busy
+- **Things that happen in real life:** a line for the runway at busy airports (you hear the aircraft
+  ahead cleared for takeoff before you; departures are never numbered), "stand by" on busy
   frequencies, other aircraft in your own instructions (give way, follow, number 2, wake turbulence),
   direct-to shortcuts, holding, runway changes, ride reports, blocked transmissions (with the
   squeal), each aircraft's own signal strength, and tired controllers late at night.
 - **Strict where it matters:** readbacks are checked in code (numbers and required phrases such as
   "hold short" or "cleared for takeoff"), relaxed about phrasing. A wrong readback gets corrected.
-- **Emergencies** (mayday, pan-pan, 7700) are handled across facilities, with diversions.
+- **Emergencies** (mayday, pan-pan, 7700) are handled across facilities, with diversions to the
+  airport the controller names: civil fields first, the nearest runway (military included) when it's
+  urgent (engines out, fire, smoke). No traffic calls in the middle of an emergency.
 - **Sound:** a voice per facility through a VHF radio effect, background traffic in the controller's
   voice that always leaves you a gap, and cockpit sounds tied to the flight (engines that spool,
   chimes, gear, flaps, autopilot disconnect, "V1, rotate", landing callouts), ducked while you talk.
