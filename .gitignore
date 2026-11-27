@@ -12,3 +12,4 @@ assets/*.wav
 scratch_*
 data/taxi/
 liveatc_transcripts/
+share/
